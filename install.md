@@ -50,13 +50,11 @@ python setup.py build_ext --inplace -j 4
 
 ## # Erstelle die Gewichte: (in MaskDINO)
 mkdir -p weights
-curl -L \                                                           
-  https://github.com/IDEA-Research/detrex-storage/releases/download/maskdino-v0.1.0/maskdino_r50_50ep_300q_hid2048_3sd1_instance_maskenhanced_mask46.3ap_box51.7ap.pth \
-  -o weights/maskdino_r50_50ep.pth
-
-## # -> Führt dann zu maskdino_R50_bs16_50ep_3s_dowsample2.yaml
+# Lade die Gewichte von https://github.com/IDEA-Research/MaskDINO/blob/main/README.md -> MaskDINO (hid 1024)
+# lade sie in die weights Datei
 
 
-# Zusätzlich
+
+# Zusätzlich manchmal nötig
   pip install Pillow
   pip install torch torchvision torchaudio
