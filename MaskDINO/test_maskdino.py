@@ -31,7 +31,7 @@ sys.path.insert(0, "/Users/nicklehmacher/Alles/MasterArbeit/MaskDINO")
 from maskdino import add_maskdino_config
 
 # Bild laden
-image_path = "/Users/nicklehmacher/Alles/MasterArbeit/image/Gemini_Generated_Image_bytbzbytbzbytbzb.png"
+image_path = "/Users/nicklehmacher/Alles/MasterArbeit/MaskDINO/image/Gemini_Generated_Image_bytbzbytbzbytbzb.png"
 im = cv2.imread(image_path)
 if im is None:
     raise FileNotFoundError(f"❌ Bild nicht gefunden: {image_path}")
