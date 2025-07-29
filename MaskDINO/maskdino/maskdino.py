@@ -340,8 +340,19 @@ class MaskDINO(nn.Module):
             image_size_xyxy = torch.as_tensor([w, h, w, h], dtype=torch.float, device=self.device)
 
             gt_masks = targets_per_image.gt_masks
-            padded_masks = torch.zeros((gt_masks.shape[0], h_pad, w_pad), dtype=gt_masks.dtype, device=gt_masks.device)
-            padded_masks[:, : gt_masks.shape[1], : gt_masks.shape[2]] = gt_masks
+            # Handle different mask formats (BitMasks, PolygonMasks, etc.)
+            if hasattr(gt_masks, 'tensor'):
+                # Already a tensor
+                mask_tensor = gt_masks.tensor
+            elif hasattr(gt_masks, 'to_tensor'):
+                # Convert to tensor format  
+                mask_tensor = gt_masks.to_tensor()
+            else:
+                # Try to get tensor representation
+                mask_tensor = gt_masks.tensor if hasattr(gt_masks, 'tensor') else gt_masks
+            
+            padded_masks = torch.zeros((mask_tensor.shape[0], h_pad, w_pad), dtype=mask_tensor.dtype, device=mask_tensor.device)
+            padded_masks[:, : mask_tensor.shape[1], : mask_tensor.shape[2]] = mask_tensor
             new_targets.append(
                 {
                     "labels": targets_per_image.gt_classes,
