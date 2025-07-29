@@ -2,8 +2,6 @@
 python -c "import platform; print(platform.machine())"
 -> arm64
 
-
-
 ### Um es zu Installieren auf Mac folge den folgenden Anweisungen
 
 conda create -n maskdino-arm python=3.10 -y
@@ -52,8 +50,6 @@ python setup.py build_ext --inplace -j 4
 mkdir -p weights
 # Lade die Gewichte von https://github.com/IDEA-Research/MaskDINO/blob/main/README.md -> MaskDINO (hid 1024)
 # lade sie in die weights Datei
-
-
 
 # Zusätzlich manchmal nötig
   pip install Pillow
