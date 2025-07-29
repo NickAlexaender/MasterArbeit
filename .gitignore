@@ -7,5 +7,5 @@ ultralytics/datasets/
 # Ignore everything in the output folder for the car parts finetune
 maskdino/output/car_parts_finetune/
 
-# Ignore the initial weigths
+# Ignore the initial weights
 maskdino/weights/
