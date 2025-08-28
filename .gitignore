@@ -4,8 +4,12 @@ ultralytics/carparts-seg.zip
 # Ignore everything in the datasets folder (including subfolders and files)
 ultralytics/datasets/
 
-# Ignore everything in the output folder for the car parts finetune
-maskdino/output/car_parts_finetune/
+# Ignore everything in the output folder
+myThesis/output/
 
 # Ignore the initial weights
-maskdino/weights/
+myThesis/weights/
+
+# Ignores the images for tests
+myThesis/image/
+
