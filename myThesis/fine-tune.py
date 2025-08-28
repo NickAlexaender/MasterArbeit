@@ -49,10 +49,25 @@ from detectron2.evaluation import COCOEvaluator
 import logging
 
 # MaskDINO zum Python-Pfad hinzufügen
-sys.path.insert(0, "/Users/nicklehmacher/Alles/MasterArbeit/MaskDINO")
+maskdino_path = "/Users/nicklehmacher/Alles/MasterArbeit/MaskDINO"
+if not os.path.exists(maskdino_path):
+    print(f"❌ MaskDINO path does not exist: {maskdino_path}")
+    sys.exit(1)
+
+sys.path.insert(0, maskdino_path)
+print(f"✅ Added MaskDINO to Python path: {maskdino_path}")
 
 # Importiere MaskDINO-spezifische Module
-from maskdino import add_maskdino_config
+# In MaskDINO nur maskdino statt MaskDINO.maskdino
+try:
+    from maskdino import add_maskdino_config
+    print("✅ MaskDINO modules imported successfully")
+except ImportError as e:
+    print(f"❌ Failed to import MaskDINO modules: {e}")
+    print("   → Make sure MaskDINO is properly installed")
+    print("   → Check if the path '/Users/nicklehmacher/Alles/MasterArbeit/MaskDINO' exists")
+    sys.exit(1)
+
 
 class CarPartsTrainer(DefaultTrainer):
     """
@@ -301,7 +316,7 @@ def setup_config():
     cfg.INPUT.MAX_SIZE_TEST = 1333
     
     # Pre-trained weights vom funktionierenden Modell - EXAKT wie in test_maskdino.py
-    weights_path = "/Users/nicklehmacher/Alles/MasterArbeit/MaskDINO/weights/maskdino_r50_50ep_300q_hid1024_3sd1_instance_maskenhanced_mask46.1ap_box51.5ap.pth"
+    weights_path = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/weights/maskdino_r50_50ep_300q_hid1024_3sd1_instance_maskenhanced_mask46.1ap_box51.5ap.pth"
     cfg.MODEL.WEIGHTS = weights_path
     cfg.MODEL.DEVICE = "cpu"  # CPU-only (wie in test_maskdino.py)
     
@@ -324,7 +339,7 @@ def setup_config():
     cfg.DATALOADER.FILTER_EMPTY_ANNOTATIONS = True
     
     # Output Directory
-    cfg.OUTPUT_DIR = "/Users/nicklehmacher/Alles/MasterArbeit/MaskDINO/output/car_parts_finetune"
+    cfg.OUTPUT_DIR = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune"
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     
     print("✅ Manual configuration applied with all required parameters")
@@ -377,6 +392,7 @@ if __name__ == "__main__":
     args = default_argument_parser().parse_args()
     print("🎯 MaskDINO Car Parts Fine-tuning Script")
     print("=" * 50)
+    print(f"📁 Running from: {os.path.dirname(os.path.abspath(__file__))}")
     
     # Launch training
     launch(
