@@ -68,13 +68,8 @@ def register_datasets():
     """
     dataset_root = "/Users/nicklehmacher/Alles/MasterArbeit/ultralytics/datasets"
     
-    # WICHTIG:
-    # In Detectron2 ist DatasetCatalog KEINE normale Liste/Map,
-    # der direkte "in"-Check funktioniert oft nicht wie erwartet.
-    # Robust wäre: if "car_parts_train" not in DatasetCatalog.list():
-    # Hier belassen wir die Zeile wie in deinem Code und kommentieren nur.
-    if "car_parts_train" not in DatasetCatalog:
-        # Registriert ein COCO-Dataset (Name, COCO-JSON, Bildpfad)
+    # Registrierung robust prüfen
+    if "car_parts_train" not in DatasetCatalog.list():
         register_coco_instances(
             "car_parts_train", {},
             os.path.join(dataset_root, "annotations", "instances_train2017.json"),
@@ -134,8 +129,11 @@ class RotFeatureAnalyzer:
         print(f"🔧 Loading model from: {self.model_path}")
         
         self.cfg = self._setup_config()
+        # Sicherstellen, dass die Anzahl der Klassen zur Config passt
+        assert len(MetadataCatalog.get("car_parts_train").thing_classes) == \
+            self.cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES, "NUM_CLASSES ≠ Anzahl Labels"
         self.cfg.MODEL.WEIGHTS = ""   # wichtig: Checkpointer lädt später, also hier leer lassen
-        self.cfg.freeze()             # verhindert versehentliche Änderungen zur Laufzeit
+        self.cfg.freeze()               # verhindert versehentliche Änderungen zur Laufzeit
         
         # Modell entsprechend der Config konstruieren; eval() deaktiviert Dropout/BatchNorm-Training
         self.model = build_model(self.cfg)
@@ -147,72 +145,108 @@ class RotFeatureAnalyzer:
         print("✅ Model loaded successfully")
     
     def _setup_config(self):
-        """Setup MaskDINO Config
-        - Stellt die Architektur, Backbone, Normalisierung, Sem-Seg-Head usw. ein
-        - Achtung: NUM_CLASSES muss zu deinen 'thing_classes' passen (hier 23)
-        """
+        """Setup MaskDINO Config aligned with fine-tune settings to match checkpoint shapes"""
         cfg = get_cfg()
-        add_maskdino_config(cfg)  # ergänzt MaskDINO-spezifische Config-Felder
-        
-        # Basis-Konfiguration (Architektur/Backbone)
+        add_maskdino_config(cfg)
+
+        # Backbone/ResNet
         cfg.MODEL.META_ARCHITECTURE = "MaskDINO"
         cfg.MODEL.BACKBONE.NAME = "build_resnet_backbone"
+        cfg.MODEL.BACKBONE.FREEZE_AT = 0
         cfg.MODEL.RESNETS.DEPTH = 50
-        cfg.MODEL.RESNETS.OUT_FEATURES = ["res2", "res3", "res4", "res5"]  # Multi-Scale Feat-Maps
-        
-        # Normalisierung gemäß ImageNet-Statistiken (RGB-Order beachten)
+        cfg.MODEL.RESNETS.STEM_OUT_CHANNELS = 64
+        cfg.MODEL.RESNETS.OUT_FEATURES = ["res2", "res3", "res4", "res5"]
+        cfg.MODEL.RESNETS.NORM = "FrozenBN"
+        cfg.MODEL.RESNETS.RES2_OUT_CHANNELS = 256
+        cfg.MODEL.RESNETS.STRIDE_IN_1X1 = False
+        cfg.MODEL.RESNETS.RES5_MULTI_GRID = [1, 1, 1]
+
+        # Normalization
         cfg.MODEL.PIXEL_MEAN = [123.675, 116.280, 103.530]
-        cfg.MODEL.PIXEL_STD  = [58.395, 57.120, 57.375]
-        
-        # Semantischer Segmentation-Head von MaskDINO
+        cfg.MODEL.PIXEL_STD = [58.395, 57.120, 57.375]
+
+        # SemSeg Head / Pixel Decoder
         cfg.MODEL.SEM_SEG_HEAD.NAME = "MaskDINOHead"
+        cfg.MODEL.SEM_SEG_HEAD.IGNORE_VALUE = 255
         cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 23
+        cfg.MODEL.SEM_SEG_HEAD.LOSS_WEIGHT = 1.0
+        cfg.MODEL.SEM_SEG_HEAD.CONVS_DIM = 256
+        cfg.MODEL.SEM_SEG_HEAD.MASK_DIM = 256
+        cfg.MODEL.SEM_SEG_HEAD.NORM = "GN"
         cfg.MODEL.SEM_SEG_HEAD.PIXEL_DECODER_NAME = "MaskDINOEncoder"
+        cfg.MODEL.SEM_SEG_HEAD.DIM_FEEDFORWARD = 1024
+        cfg.MODEL.SEM_SEG_HEAD.NUM_FEATURE_LEVELS = 3
+        cfg.MODEL.SEM_SEG_HEAD.TOTAL_NUM_FEATURE_LEVELS = 3
         cfg.MODEL.SEM_SEG_HEAD.IN_FEATURES = ["res2", "res3", "res4", "res5"]
         cfg.MODEL.SEM_SEG_HEAD.DEFORMABLE_TRANSFORMER_ENCODER_IN_FEATURES = ["res3", "res4", "res5"]
-        
-        # MaskDINO Kern-Parameter (Dimensionalität, Queries, Heads, Decodertiefe)
+        cfg.MODEL.SEM_SEG_HEAD.COMMON_STRIDE = 4
+        cfg.MODEL.SEM_SEG_HEAD.TRANSFORMER_ENC_LAYERS = 6
+
+        # MaskDINO core
+        cfg.MODEL.MaskDINO.TRANSFORMER_DECODER_NAME = "MaskDINODecoder"
+        cfg.MODEL.MaskDINO.DEEP_SUPERVISION = True
+        cfg.MODEL.MaskDINO.NO_OBJECT_WEIGHT = 0.1
+        cfg.MODEL.MaskDINO.CLASS_WEIGHT = 4.0
+        cfg.MODEL.MaskDINO.MASK_WEIGHT = 5.0
+        cfg.MODEL.MaskDINO.DICE_WEIGHT = 5.0
+        cfg.MODEL.MaskDINO.BOX_WEIGHT = 5.0
+        cfg.MODEL.MaskDINO.GIOU_WEIGHT = 2.0
         cfg.MODEL.MaskDINO.HIDDEN_DIM = 256
         cfg.MODEL.MaskDINO.NUM_OBJECT_QUERIES = 300
         cfg.MODEL.MaskDINO.NHEADS = 8
+        cfg.MODEL.MaskDINO.DROPOUT = 0.0
+        cfg.MODEL.MaskDINO.DIM_FEEDFORWARD = 2048
+        cfg.MODEL.MaskDINO.ENC_LAYERS = 0
+        cfg.MODEL.MaskDINO.PRE_NORM = False
+        cfg.MODEL.MaskDINO.ENFORCE_INPUT_PROJ = False
+        cfg.MODEL.MaskDINO.SIZE_DIVISIBILITY = 32
         cfg.MODEL.MaskDINO.DEC_LAYERS = 3
-        
-        # Input/Resize-Regeln für Inferenz
+        cfg.MODEL.MaskDINO.TRAIN_NUM_POINTS = 12544
+        cfg.MODEL.MaskDINO.OVERSAMPLE_RATIO = 3.0
+        cfg.MODEL.MaskDINO.IMPORTANCE_SAMPLE_RATIO = 0.75
+        cfg.MODEL.MaskDINO.INITIAL_PRED = True
+        cfg.MODEL.MaskDINO.TWO_STAGE = True
+        cfg.MODEL.MaskDINO.DN = "seg"
+        cfg.MODEL.MaskDINO.DN_NUM = 100
+        cfg.MODEL.MaskDINO.INITIALIZE_BOX_TYPE = "bitmask"
+
+        # Inference input settings
         cfg.INPUT.FORMAT = "RGB"
         cfg.INPUT.MIN_SIZE_TEST = 800
         cfg.INPUT.MAX_SIZE_TEST = 1333
-        
-        # Dataset-Zuweisung (nur Train hier relevant für Metadaten; Inferenz nutzt Bildpfad manuell)
+
+        # Datasets (for metadata)
         cfg.DATASETS.TRAIN = ("car_parts_train",)
-        
-        # CPU erzwingen (nützlich auf M1/Mac ohne CUDA)
+
+        # Test/Inference thresholds
+        cfg.MODEL.MaskDINO.TEST.SEMANTIC_ON = False
+        cfg.MODEL.MaskDINO.TEST.INSTANCE_ON = True
+        cfg.MODEL.MaskDINO.TEST.PANOPTIC_ON = False
+        cfg.MODEL.MaskDINO.TEST.OVERLAP_THRESHOLD = 0.8
+        cfg.MODEL.MaskDINO.TEST.OBJECT_MASK_THRESHOLD = 0.25
+        cfg.MODEL.MaskDINO.TEST.SCORE_THRESH_TEST = 0.5
+
+        # Device
         cfg.MODEL.DEVICE = "cpu"
-        
+
         return cfg
     
     def _register_hooks(self):
-        """Registriere Hook für Feature Extraction
-        - Wir hängen eine Forward-Hook-Funktion an einen spezifischen Layer
-        - Beim Forward-Pass wird so dessen Output in self.features gespeichert
-        
-        WICHTIG/HEIKEL:
-        - Die Layernamen hängen stark von der Implementation ab. 'backbone.res2.0'
-          ist eine plausibel frühe Stufe (hohe Auflösung, farbnahe Features).
-        - Falls sich der Modellgraph unterscheidet, kann dieser Name nicht existieren.
-          Dann greift der Hook nicht -> entsprechend Warnung ausgeben.
-        """
-        def hook_fn(module, input, output):
-            # clone().detach(): sichert einen Snapshot ohne Autograd-Verknüpfung
-            self.features['encoder_features'] = output.clone().detach()
-        
-        # Wir durchsuchen die benannten Module und registrieren am ersten Treffer
+        """Hook hart auf Encoder-Layer setzen"""
+        TARGET = "sem_seg_head.pixel_decoder.transformer.encoder.layers.0"
+
+        def hook_fn(m, i, o):
+            self.features["encoder_features"] = o.detach().cpu()
+
+        found = False
         for name, module in self.model.named_modules():
-            if 'backbone.res2.0' in name:
-                print(f"🎯 Hook registered on: {name}")
+            if name.endswith(TARGET):
                 module.register_forward_hook(hook_fn)
-                return
-        # Wenn kein passender Layer gefunden wurde, später entsprechend reagieren
-        print("⚠️ No suitable layer found for hook")
+                print(f"🎯 Hook registered on: {name}")
+                found = True
+                break
+        if not found:
+            print(f"⚠️ No suitable layer found for hook (target: {TARGET})")
     
     def load_rot_mask(self, rot_path: str):
         """Lade die Rot-Maske (Binärbild)
@@ -232,35 +266,17 @@ class RotFeatureAnalyzer:
         return rot_mask
     
     def preprocess_image(self, image_path: str):
-        """Preprocess Input-Bild
-        Schritte:
-        1) Laden (BGR->RGB)
-        2) Skalieren auf det2-Regeln (min=MIN_SIZE_TEST, max=MAX_SIZE_TEST)
-        3) Normalisieren mit PIXEL_MEAN/STD
-        4) In Tensor [C,H,W] konvertieren (float32)
-        """
-        image = cv2.imread(image_path)
-        # Robustheit: Falls None, hier lieber früh scheitern
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        
-        # Resize-Logik analog Detectron2: skaliert die kürzere Kante auf MIN_SIZE_TEST,
-        # begrenzt die längere Kante auf MAX_SIZE_TEST. Ergebnis ist isotropes Scaling.
-        height, width = image.shape[:2]
-        scale = min(self.cfg.INPUT.MIN_SIZE_TEST / min(height, width), 
-                   self.cfg.INPUT.MAX_SIZE_TEST / max(height, width))
-        new_h, new_w = int(height * scale), int(width * scale)
-        image_resized = cv2.resize(image, (new_w, new_h))
-        
-        # Normalisierung: Subtrahiere Mittelwert, teile durch Std (pro Kanal)
-        pixel_mean = np.array(self.cfg.MODEL.PIXEL_MEAN)
-        pixel_std  = np.array(self.cfg.MODEL.PIXEL_STD)
-        image_normalized = (image_resized - pixel_mean) / pixel_std
-        
-        # In Tensor und Kanal-First (C,H,W)
-        image_tensor = torch.from_numpy(image_normalized).permute(2, 0, 1).float()
-        
-        # Rückgabe: Tensor (für Modell), resized RGB (für Visualisierung), neue Größe
-        return image_tensor, image_resized, (new_h, new_w)
+        img = cv2.imread(image_path)
+        if img is None:
+            raise FileNotFoundError(image_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        h, w = img.shape[:2]
+        scale = min(self.cfg.INPUT.MIN_SIZE_TEST / min(h, w),
+                    self.cfg.INPUT.MAX_SIZE_TEST / max(h, w))
+        nh, nw = int(h * scale), int(w * scale)
+        img_resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        tensor = torch.from_numpy(img_resized).permute(2, 0, 1).float()  # KEINE Normierung
+        return tensor, img_resized, (nh, nw)
     
     def extract_features(self, image_path: str):
         """Extrahiere Features
@@ -317,61 +333,57 @@ class RotFeatureAnalyzer:
     
     def find_best_rot_feature(self, features: torch.Tensor, rot_mask: np.ndarray):
         """Finde das Feature mit der besten IoU für Rot
-        Unterstützte Eingänge:
-        - 4D Tensor [B, C, H, W]: klassische CNN-Feature-Maps
-        - 3D Tensor [B, N, D]: Transformer-Tokens; wird versucht auf [C= D, H, W]
-          umzulegen, falls N eine Quadratzahl ist (N = H*W)
-        
-        WICHTIG/HEIKEL:
-        - Bei Transformer-Token ist die räumliche Zuordnung oft nicht exakt quadratisch,
-          abhängig vom Tokenizer/Stride. Hier nutzen wir die Quadrat-Annahme als Heuristik.
-          Falls nicht möglich -> Abbruch mit Hinweis.
+        Unterstützt:
+        - 4D Convolutional Maps: [B, C, H, W]
+        - 3D Transformer Tokens: [B, N, D] (wird auf 2D-Gitter (H×W) gefaltet)
         """
         print("🎯 Analyzing features for rot correlation...")
-        
-        # Format normalisieren: Wir wollen am Ende ein Array [C, H, W]
+
+        # Hilfsfunktion: N in (H, W) faktorisieren (nahe Quadrat, ohne Padding)
+        def factor_hw(n: int):
+            import math
+            s = int(math.sqrt(n))
+            # finde größtes h<=sqrt(n), das n teilt; fallback auf (s, ceil(n/s))
+            for h in range(s, 0, -1):
+                if n % h == 0:
+                    return h, n // h
+            return s, (n + s - 1) // s
+
         if len(features.shape) == 4:  # [B, C, H, W]
-            features_np = features[0].numpy()  # -> [C, H, W] (Batch 0)
+            features_np = features[0].numpy()  # [C, H, W]
             num_channels = features_np.shape[0]
-        elif len(features.shape) == 3:  # [B, N, D] - Transformer
-            features_np = features[0].numpy()  # -> [N, D]
-            # Versuch: N als Quadratzahl interpretieren, dann transponieren: [D, N] -> [D, H, W]
-            spatial_size = int(np.sqrt(features_np.shape[0]))
-            if spatial_size * spatial_size == features_np.shape[0]:
-                features_np = features_np.T.reshape(features_np.shape[1], spatial_size, spatial_size)
-                num_channels = features_np.shape[0]
-            else:
-                print("❌ Cannot handle non-square transformer features")
-                return None, None, None
+            get_channel_map = lambda c: features_np[c]
+        elif len(features.shape) == 3:  # [B, N, D] -> [D, H, W]
+            tokens = features[0].numpy()  # [N, D]
+            tokens = tokens.T  # [D, N]
+            num_channels, n = tokens.shape
+            h, w = factor_hw(n)
+            # baue Zugriffsfunktion, ohne alle Kanäle upfront zu reshapen
+            def get_channel_map(c):
+                return tokens[c].reshape(h, w)
+            print(f"ℹ️ Transformer tokens reshaped to grid: ({h}, {w}) from N={n}")
         else:
-            print(f"❌ Unexpected feature shape: {features.shape}")
-            return None, None, None
-        
+            print(f"❌ Unsupported feature shape: {features.shape}")
+            return None, None, None, None
+
         print(f"📊 Analyzing {num_channels} feature channels")
-        
+
         best_iou = 0.0
         best_channel = 0
         best_feature_binary = None
-        
-        ious = []  # (channel, iou) Paare für Ranking/Plot
-        
-        # Kanäle durchgehen und deren binarisierte Aktivierungen gegen die Rot-Maske vergleichen
+        ious = []  # (channel, iou)
+
         for c in range(num_channels):
-            feature_map = features_np[c]
+            feature_map = get_channel_map(c)
             iou, feature_binary = self.calculate_iou(feature_map, rot_mask)
             ious.append((c, iou))
-            
             if iou > best_iou:
                 best_iou = iou
                 best_channel = c
                 best_feature_binary = feature_binary
-        
-        # Absteigend nach IoU sortieren -> Top-K Übersicht
+
         ious.sort(key=lambda x: x[1], reverse=True)
-        
         print(f"✅ Best rot feature: Channel {best_channel} with IoU {best_iou:.4f}")
-        
-        # Rückgabe zusätzlich mit Top-10-Liste (für Plot/Report)
         return best_channel, best_iou, best_feature_binary, ious[:10]
     
     def visualize_results(self, original_image: np.ndarray, rot_mask: np.ndarray, 
