@@ -282,7 +282,7 @@ def compute_iou_combined(
 
 def _main_preview(limit: int = 5) -> None:
 	try:
-		from .calculate_IoU import iter_iou_inputs
+		from .calculate_IoU_for_encoder import iter_iou_inputs
 	except Exception as e:  # pragma: no cover
 		print(f"Konnte iter_iou_inputs nicht importieren: {e}")
 		return
