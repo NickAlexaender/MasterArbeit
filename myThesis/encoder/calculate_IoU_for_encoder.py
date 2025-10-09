@@ -1,11 +1,19 @@
 """
-Vorstufe für iou_core.py:
+Network Dissection für Encoder-Features.
+
+Implementiert die Network Dissection Methode zur Identifikation konzept-spezifischer Features:
 - iteriert über output/encoder/layer*/feature.csv
 - extrahiert Layer-, Bild- und Feature-Index sowie Tokens (pro Zeile)
 - lädt passende Bild-Infos aus output/encoder/<image_id>/shapes.json
-- bereitet die Maske aus myThesis/image/colours/rot.png in input-Größe vor
+- bereitet Masken aus myThesis/image/rot/ in Input-Größe vor
+- berechnet per-Feature Thresholds über alle Bilder (Network Dissection)
+- exportiert mIoU-Ergebnisse und Visualisierungen
 
-Ergebnis: Generator, der iou_core mit allen benötigten Inputs versorgt.
+Hauptfunktion: main_export_network_dissection()
+
+Ausgabe:
+- myThesis/output/encoder/network_dissection/layerX/miou_network_dissection.csv
+- myThesis/output/encoder/network_dissection/layerX/network_dissection/FeatureY/*.png
 """
 
 from __future__ import annotations
@@ -26,13 +34,21 @@ except Exception:  # pragma: no cover
 
 
 # -----------------------------
+# Globale Konfiguration
+# -----------------------------
+
+# Network Dissection: Per-Feature Threshold (0-100 für Perzentil)
+NETWORK_DISSECTION_PERCENTILE = 90.0
+
+
+# -----------------------------
 # Datenstruktur für iou_core.py
 # -----------------------------
 
 @dataclass
 class IoUInput:
 	layer_idx: int
-	image_idx: int  # 1-basiert gemäß CSV-Erzeugung
+	image_id: str  # String-ID (z.B. "image 1") statt numerischer Index
 	feature_idx: int  # 1-basiert gemäß CSV-Erzeugung
 	tokens: np.ndarray  # Shape: (N,) float32
 	shapes: Dict  # shapes.json-Inhalt
@@ -52,8 +68,8 @@ def _encoder_out_dir() -> str:
 	return os.path.join(_project_root(), "output", "encoder")
 
 
-def _mask_path() -> str:
-	return os.path.join(_project_root(), "image", "colours", "rot.png")
+def _mask_dir() -> str:
+	return os.path.join(_project_root(), "image", "rot")
 
 
 def _find_layer_csvs() -> List[Tuple[int, str]]:
@@ -99,32 +115,39 @@ def _load_all_shapes() -> Dict[str, Dict]:
 	return out
 
 
-def _select_shapes_for(image_idx: int, n_tokens: int, all_shapes: Dict[str, Dict]) -> Optional[Dict]:
-	"""Wählt passende shapes.json für den gegebenen Bild-Index.
+def _select_shapes_for(image_id: str, n_tokens: int, all_shapes: Dict[str, Dict]) -> Optional[Dict]:
+	"""Wählt passende shapes.json für die gegebene image_id.
 
 	Strategie:
-	1) Wenn es exakt eine shapes.json gibt -> nimm diese.
-	2) Versuche Match über N_tokens.
-	3) Fallback: alphabetisch sortieren und 1-basiert zuordnen.
+	1) Direkter Match über image_id (bevorzugt).
+	2) Wenn nicht gefunden: Match über N_tokens.
+	3) Fallback: gebe None zurück (kein unsicheres Raten mehr).
 	"""
 	if not all_shapes:
 		return None
-	if len(all_shapes) == 1:
-		return next(iter(all_shapes.values()))
 
-	# 2) Match über N_tokens
+	# 1) Direkter Match über image_id (z.B. "image 1" -> Ordner "image 1")
+	if image_id in all_shapes:
+		return all_shapes[image_id]
+
+	# 2) Match über image_id in der shapes.json selbst (falls Ordnername abweicht)
+	for folder_name, shapes_data in all_shapes.items():
+		if shapes_data.get("image_id") == image_id:
+			return shapes_data
+
+	# 3) Match über N_tokens als Fallback (wenn mehrere vorhanden, nimm ersten Match)
 	matches = [v for v in all_shapes.values() if int(v.get("N_tokens", -1)) == int(n_tokens)]
 	if len(matches) == 1:
 		return matches[0]
 	if len(matches) > 1:
-		# Nicht eindeutig – wähle deterministisch erstes nach image_id
-		items = sorted(((k, v) for k, v in all_shapes.items() if v in matches), key=lambda kv: kv[0])
-		return items[0][1]
+		# Mehrere Matches mit gleicher Token-Anzahl – wähle deterministisch nach image_id
+		matches_with_id = [(v.get("image_id", ""), v) for v in matches]
+		matches_with_id.sort(key=lambda x: x[0])
+		return matches_with_id[0][1]
 
-	# 3) Fallback: 1-basierte Reihenfolge über alphabetische Sortierung
-	items_sorted = sorted(all_shapes.items(), key=lambda kv: kv[0])
-	idx0 = max(0, min(len(items_sorted) - 1, image_idx - 1))
-	return items_sorted[idx0][1]
+	# 4) Keine Übereinstimmung gefunden
+	print(f"⚠️ Keine passende shapes.json für image_id='{image_id}' gefunden (N_tokens={n_tokens})")
+	return None
 
 
 # -----------------------------
@@ -153,9 +176,16 @@ def _prepare_mask_binary(mask_bgr: np.ndarray) -> np.ndarray:
 		return non_black
 	return red_dominant
 
-def _load_mask_for_input(input_size: Tuple[int, int]) -> np.ndarray:
-	"""Lädt die Maske und liefert sie als bool-Array in input-Größe (H_in, W_in)."""
-	mask_file = _mask_path()
+def _load_mask_for_input(input_size: Tuple[int, int], image_id: str) -> np.ndarray:
+	"""Lädt die Maske für das gegebene Bild und liefert sie als bool-Array in input-Größe (H_in, W_in)."""
+	mask_dir = _mask_dir()
+	# Konstruiere den Maskenpfad basierend auf der image_id
+	# Beispiel: image_id = "image 1" -> mask_file = "image 1.jpg"
+	mask_file = os.path.join(mask_dir, f"{image_id}.jpg")
+	if not os.path.isfile(mask_file):
+		# Falls .jpg nicht existiert, versuche .png
+		mask_file = os.path.join(mask_dir, f"{image_id}.png")
+	
 	if cv2 is None:
 		raise RuntimeError("OpenCV (cv2) wird benötigt, ist aber nicht verfügbar.")
 	m = cv2.imread(mask_file, cv2.IMREAD_COLOR)
@@ -173,13 +203,15 @@ def _load_mask_for_input(input_size: Tuple[int, int]) -> np.ndarray:
 # CSV-Iteration und Paketierung
 # -----------------------------
 
-_NAME_RE = re.compile(r"^Bild(\d+),\s*Feature(\d+)$")
+# Neues Format: "image 1, Feature1" statt "Bild1, Feature1"
+_NAME_RE = re.compile(r"^(.+?),\s*Feature(\d+)$")
 
 
-def _iter_csv_rows(csv_path: str) -> Iterable[Tuple[int, int, np.ndarray]]:
-	"""Iteriert Zeilen einer feature.csv und liefert (image_idx, feature_idx, tokens).
+def _iter_csv_rows(csv_path: str) -> Iterable[Tuple[str, int, np.ndarray]]:
+	"""Iteriert Zeilen einer feature.csv und liefert (image_id, feature_idx, tokens).
 
 	tokens ist ein 1D np.ndarray[N] float32.
+	image_id ist der String-Identifikator (z.B. "image 1").
 	"""
 	with open(csv_path, "r", encoding="utf-8") as f:
 		reader = csv.reader(f)
@@ -191,7 +223,7 @@ def _iter_csv_rows(csv_path: str) -> Iterable[Tuple[int, int, np.ndarray]]:
 			m = _NAME_RE.match(name)
 			if not m:
 				continue
-			img_idx = int(m.group(1))
+			image_id = m.group(1).strip()
 			feat_idx = int(m.group(2))
 			try:
 				values = [float(x) for x in row[1:]]
@@ -199,39 +231,41 @@ def _iter_csv_rows(csv_path: str) -> Iterable[Tuple[int, int, np.ndarray]]:
 				# Überspringe fehlerhafte Zeilen
 				continue
 			tokens = np.asarray(values, dtype=np.float32)
-			yield img_idx, feat_idx, tokens
+			yield image_id, feat_idx, tokens
 
 
 def iter_iou_inputs() -> Generator[IoUInput, None, None]:
 	"""Haupt-Iterator: liefert pro CSV-Zeile ein IoUInput-Paket.
 	- Erkennt Layer-Index aus Ordnernamen.
-	- Mappt Bild-Index auf passende shapes.json.
-	- Bereitet Maske für input-Size vor (gecacht pro input_size).
+	- Mappt image_id auf passende shapes.json (direkter Match).
+	- Bereitet Maske für input-Size vor (gecacht pro input_size UND image_id).
 	"""
 	layer_csvs = _find_layer_csvs()
 	all_shapes = _load_all_shapes()
-	# Cache: Maske je input_size
-	mask_cache_input: Dict[Tuple[int, int], np.ndarray] = {}
+	# Cache: Maske je (input_size, image_id) - da jetzt verschiedene Masken für verschiedene Bilder
+	mask_cache_input: Dict[Tuple[int, int, str], np.ndarray] = {}
 
 	for lidx, csv_path in layer_csvs:
-		for img_idx, feat_idx, tokens in _iter_csv_rows(csv_path):
-			shapes = _select_shapes_for(img_idx, tokens.size, all_shapes)
+		for image_id, feat_idx, tokens in _iter_csv_rows(csv_path):
+			shapes = _select_shapes_for(image_id, tokens.size, all_shapes)
 			if shapes is None:
 				# Ohne Shapes ist Reassemblierung in iou_core schwierig – skippe
 				continue
 			Hin, Win = int(shapes["input_size"][0]), int(shapes["input_size"][1])
+			# image_id aus shapes verwenden (sollte identisch sein, aber sicherer)
+			image_id_from_shapes = shapes.get("image_id", image_id)
 
-			# Maske beschaffen (gecacht nach input-Größe)
-			key_in = (Hin, Win)
+			# Maske beschaffen (gecacht nach input-Größe UND image_id)
+			key_in = (Hin, Win, image_id_from_shapes)
 			if key_in in mask_cache_input:
 				mask_input = mask_cache_input[key_in]
 			else:
-				mask_input = _load_mask_for_input((Hin, Win))
+				mask_input = _load_mask_for_input((Hin, Win), image_id_from_shapes)
 				mask_cache_input[key_in] = mask_input
 
 			yield IoUInput(
 				layer_idx=lidx,
-				image_idx=img_idx,
+				image_id=image_id_from_shapes,
 				feature_idx=feat_idx,
 				tokens=tokens,
 				shapes=shapes,
@@ -240,67 +274,79 @@ def iter_iou_inputs() -> Generator[IoUInput, None, None]:
 
 
 # -----------------------------
+# FeatureHeatmapAggregator für globale Binarisierung
+# -----------------------------
+
+class FeatureHeatmapAggregator:
+	"""Sammelt Heatmaps eines Features über alle Bilder für globale Binarisierung."""
+
+	def __init__(self, layer_idx: int, feature_idx: int):
+		self.layer_idx = layer_idx
+		self.feature_idx = feature_idx
+		self.heatmaps: List[np.ndarray] = []
+		self.masks: List[np.ndarray] = []
+		self.image_ids: List[str] = []
+
+	def add_heatmap(self, heatmap: np.ndarray, mask: np.ndarray, image_id: str) -> None:
+		"""Fügt eine Heatmap + zugehörige Maske hinzu."""
+		if heatmap.shape != mask.shape:
+			raise ValueError(f"Shape-Mismatch: Heatmap {heatmap.shape} vs. Maske {mask.shape}")
+		self.heatmaps.append(heatmap)
+		self.masks.append(mask)
+		self.image_ids.append(image_id)
+
+	def compute_network_dissection_threshold(self, percentile: float = None) -> float:
+		"""Berechnet Network Dissection Threshold über alle Pixel aller Heatmaps dieses Features.
+
+		Berechnet das Perzentil über die vereinte Menge aller Aktivierungswerte.
+		Dies entspricht der Network Dissection Methode.
+
+		Args:
+			percentile: Perzentil (0-100) - falls None, wird NETWORK_DISSECTION_PERCENTILE verwendet
+
+		Returns:
+			float: Per-Feature Threshold
+		"""
+		if not self.heatmaps:
+			return 0.0
+		
+		if percentile is None:
+			percentile = NETWORK_DISSECTION_PERCENTILE
+		
+		# Flatten alle Heatmaps zu einem 1D-Array aller Aktivierungswerte
+		all_values = np.concatenate([hm.flatten() for hm in self.heatmaps])
+		return float(np.percentile(all_values, float(percentile)))
+
+	def compute_miou(self, threshold: float) -> Tuple[float, List[float]]:
+		"""Berechnet mIoU über alle Bilder mit gegebenem Threshold.
+
+		Returns:
+			(mIoU, List[individual_ious])
+		"""
+		if not self.heatmaps:
+			return 0.0, []
+		# Lazy-Import von iou_core
+		try:
+			from .iou_core import compute_iou_from_heatmap  # type: ignore
+		except Exception:
+			import os as _os, sys as _sys
+			_sys.path.append(_os.path.dirname(__file__))
+			from iou_core import compute_iou_from_heatmap  # type: ignore
+
+		ious = [
+			compute_iou_from_heatmap(hm, msk, threshold)
+			for hm, msk in zip(self.heatmaps, self.masks)
+		]
+		miou = float(np.mean(ious))
+		return miou, ious
+
+
+# -----------------------------
 # Grundstruktur + Ausgabe
 # -----------------------------
 
-def build_iou_core_input(item: IoUInput) -> Tuple[int, int, int, np.ndarray, Dict, np.ndarray]:
-	"""Formt IoUInput in das erwartete Tupel für iou_core.py um.
-
-	Rückgabe: (layer_idx, image_idx, feature_idx, tokens, shapes, mask_input)
-	"""
-	return (
-		item.layer_idx,
-		item.image_idx,
-		item.feature_idx,
-		item.tokens,
-		item.shapes,
-		item.mask_input,
-	)
-
-
 def _ensure_dir(p: str) -> None:
 	os.makedirs(p, exist_ok=True)
-
-
-def _export_root() -> str:
-	# Sammelordner für kombinierte IoUs & Heatmaps
-	return os.path.join(_encoder_out_dir(), "iou_combined")
-
-
-def _write_csv(path: str, rows: List[Dict[str, object]]) -> None:
-	if not rows:
-		return
-	# Bestimme Spalten aus Keys des ersten Eintrags
-	fieldnames = [
-		"layer_idx",
-		"image_idx",
-		"feature_idx",
-		"iou",
-		"threshold",
-		"positives",
-		"heatmap_path",
-	"overlay_path",
-	]
-	with open(path, "w", encoding="utf-8", newline="") as f:
-		writer = csv.DictWriter(f, fieldnames=fieldnames)
-		writer.writeheader()
-		writer.writerows(rows)
-
-
-def _save_heatmap_png(dest_path: str, heatmap: np.ndarray) -> None:
-	"""Speichert eine float32-Heatmap als PNG (0-255 skaliert)."""
-	if cv2 is None:
-		raise RuntimeError("OpenCV (cv2) wird benötigt, ist aber nicht verfügbar.")
-	h = heatmap.astype(np.float32, copy=False)
-	vmin = float(h.min())
-	vmax = float(h.max())
-	if vmax <= vmin + 1e-8:
-		img = np.zeros_like(h, dtype=np.uint8)
-	else:
-		hn = (h - vmin) / (vmax - vmin)
-		img = np.clip(hn * 255.0, 0, 255).astype(np.uint8)
-	_ensure_dir(os.path.dirname(dest_path))
-	cv2.imwrite(dest_path, img)
 
 
 def _save_overlay_comparison(dest_path: str, mask_input: np.ndarray, heatmap: np.ndarray, threshold: float) -> None:
@@ -333,180 +379,173 @@ def _save_overlay_comparison(dest_path: str, mask_input: np.ndarray, heatmap: np
 	cv2.imwrite(dest_path, img)
 
 
-def main_export_combined() -> None:
-	"""Erzeugt pro Layer eine sortierte CSV aller kombinierten IoUs und speichert Heatmaps als PNG.
+# -----------------------------
+# Network Dissection Pipeline
+# -----------------------------
 
-	Ausgabe-Struktur:
-	- myThesis/output/encoder/iou_combined/layer<L>/iou_sorted.csv
-	- myThesis/output/encoder/iou_combined/layer<L>/heatmaps/Bild<I>_Feature<F>.png
+def main_export_network_dissection() -> None:
+	"""Network Dissection Pipeline mit per-Feature Thresholding.
+
+	Workflow:
+	1. Sammle alle Heatmaps pro Feature
+	2. Pro Feature: Berechne Network Dissection Threshold (Perzentil über ALLE Pixel ALLER Bilder)
+	3. Binarisiere alle Heatmaps mit diesem Feature-Threshold
+	4. Berechne mIoU über alle Bilder
+	5. Exportiere:
+	   - layerX/miou_network_dissection.csv (sortiert nach mIoU)
+	   - layerX/network_dissection/FeatureY/*.png (Visualisierungen ALLER Bilder für beste Features)
 	"""
-	# Lazy-Import von iou_core, kompatibel für Modul & Skript
+	# Lazy-Import
 	try:
-		from .iou_core import compute_iou_combined  # type: ignore
+		from .iou_core import generate_heatmap_only  # type: ignore
 	except Exception:
 		import os as _os, sys as _sys
 		_sys.path.append(_os.path.dirname(__file__))
-		from iou_core import compute_iou_combined  # type: ignore
+		from iou_core import generate_heatmap_only  # type: ignore
 
-	export_root = _export_root()
+	export_root = os.path.join(_encoder_out_dir(), "network_dissection")
 	_ensure_dir(export_root)
 
-	# Sammle Ergebnisse pro Layer
-	per_layer: Dict[int, List[Dict[str, object]]] = {}
-	# Tracking der besten(n) Einträge pro Layer (inkl. Arrays für Overlay)
-	per_layer_best: Dict[int, Dict[str, object]] = {}
+	# Schritt 1: Gruppiere nach (layer_idx, feature_idx) und sammle Heatmaps
+	aggregators: Dict[Tuple[int, int], FeatureHeatmapAggregator] = {}
 
+	print("Sammle Heatmaps pro Feature (Network Dissection)...")
 	count = 0
 	for item in iter_iou_inputs():
-		res = compute_iou_combined(
-			item,
-			threshold_method="percentile",
-			threshold_value=80.0,
-			threshold_absolute=None,
-			combine="max",
-			return_heatmap=True,
-		)
+		key = (item.layer_idx, item.feature_idx)
+		if key not in aggregators:
+			aggregators[key] = FeatureHeatmapAggregator(item.layer_idx, item.feature_idx)
+		
+		# Generiere kontinuierliche Heatmap (KEINE Binarisierung)
+		heatmap = generate_heatmap_only(item, combine="max")
+		aggregators[key].add_heatmap(heatmap, item.mask_input, item.image_id)
+		count += 1
 
-		layer_dir = os.path.join(export_root, f"layer{res.layer_idx}")
-		heat_dir = os.path.join(layer_dir, "heatmaps")
-		_ensure_dir(heat_dir)
-		heat_name = f"Bild{res.image_idx}_Feature{res.feature_idx}.png"
-		heat_path = os.path.join(heat_dir, heat_name)
+	if count == 0:
+		print("Keine Daten gefunden. Bitte zuvor die Extraktion ausführen.")
+		return
 
-		if res.heatmap is not None:
-			_save_heatmap_png(heat_path, res.heatmap)
-		else:
-			heat_path = ""  # sollte nicht passieren, return_heatmap=True
+	print(f"Gesammelt: {count} Heatmaps aus {len(aggregators)} Features")
+
+	# Schritt 2: Berechne mIoU mit Network Dissection Thresholding
+	per_layer: Dict[int, List[Dict[str, object]]] = {}
+	per_layer_best: Dict[int, Dict[str, object]] = {}
+
+	print(f"Berechne mIoU mit Network Dissection Threshold (Perzentil={NETWORK_DISSECTION_PERCENTILE})...")
+	for (lidx, fidx), agg in aggregators.items():
+		# Network Dissection Threshold: Perzentil über alle Pixel aller Bilder dieses Features
+		nd_threshold = agg.compute_network_dissection_threshold(percentile=NETWORK_DISSECTION_PERCENTILE)
+		miou, ious = agg.compute_miou(nd_threshold)
 
 		row = {
-			"layer_idx": res.layer_idx,
-			"image_idx": res.image_idx,
-			"feature_idx": res.feature_idx,
-			"iou": float(res.iou),
-			"threshold": float(res.threshold),
-			"positives": int(res.positives),
-			"heatmap_path": os.path.relpath(heat_path, start=export_root) if heat_path else "",
-			"overlay_path": "",
+			"layer_idx": lidx,
+			"feature_idx": fidx,
+			"miou": float(miou),
+			"nd_threshold": float(nd_threshold),
+			"n_images": len(ious),
+			"individual_ious": ",".join(f"{x:.6f}" for x in ious),
+			"overlay_dir": "",
 		}
-		per_layer.setdefault(res.layer_idx, []).append(row)
+		per_layer.setdefault(lidx, []).append(row)
 
-		# Bestleistung pro Layer aktualisieren (mit Toleranz für Ties)
-		best = per_layer_best.get(res.layer_idx)
+		# Tracking der besten Features pro Layer
+		best = per_layer_best.get(lidx)
 		if best is None:
-			per_layer_best[res.layer_idx] = {
-				"best_iou": float(res.iou),
-				"items": [
+			per_layer_best[lidx] = {
+				"best_miou": float(miou),
+				"features": [
 					{
-						"image_idx": res.image_idx,
-						"feature_idx": res.feature_idx,
-						"threshold": float(res.threshold),
-						"heatmap": res.heatmap,
-						"mask_input": item.mask_input,
+						"feature_idx": fidx,
+						"threshold": nd_threshold,
+						"aggregator": agg,
 					}
 				],
 			}
 		else:
-			cur_best = float(best["best_iou"])  # type: ignore
-			if float(res.iou) > cur_best + 1e-12:
-				best["best_iou"] = float(res.iou)
-				best["items"] = [
+			cur_best = float(best["best_miou"])  # type: ignore
+			if float(miou) > cur_best + 1e-12:
+				best["best_miou"] = float(miou)
+				best["features"] = [
 					{
-						"image_idx": res.image_idx,
-						"feature_idx": res.feature_idx,
-						"threshold": float(res.threshold),
-						"heatmap": res.heatmap,
-						"mask_input": item.mask_input,
+						"feature_idx": fidx,
+						"threshold": nd_threshold,
+						"aggregator": agg,
 					}
 				]
-			elif abs(float(res.iou) - cur_best) <= 1e-12:
-				best.setdefault("items", []).append(
+			elif abs(float(miou) - cur_best) <= 1e-12:
+				best.setdefault("features", []).append(
 					{
-						"image_idx": res.image_idx,
-						"feature_idx": res.feature_idx,
-						"threshold": float(res.threshold),
-						"heatmap": res.heatmap,
-						"mask_input": item.mask_input,
+						"feature_idx": fidx,
+						"threshold": nd_threshold,
+						"aggregator": agg,
 					}
 				)
 
-		count += 1
-
-	# Erzeuge Overlays der besten Features und schreibe pro Layer CSV, sortiert nach IoU absteigend
+	# Schritt 3: Exportiere binäre CSVs und Overlays für beste Features
+	print("Erstelle binäre CSVs und Overlays...")
 	for lidx, rows in per_layer.items():
-		# Overlays für beste(n) Eintrag/Einträge
-		best = per_layer_best.get(lidx)
-		overlay_map: Dict[Tuple[int, int], str] = {}
-		if best is not None:
-			items = best.get("items", [])  # type: ignore
-			layer_dir = os.path.join(export_root, f"layer{lidx}")
-			cmp_dir = os.path.join(layer_dir, "comparisons")
-			_ensure_dir(cmp_dir)
-			for it in items:  # type: ignore
-				img_idx = int(it["image_idx"])  # type: ignore
-				feat_idx = int(it["feature_idx"])  # type: ignore
-				thr = float(it["threshold"])  # type: ignore
-				hm = it["heatmap"]  # type: ignore
-				msk = it["mask_input"]  # type: ignore
-				if hm is None:
-					continue
-				cmp_name = f"best_Bild{img_idx}_Feature{feat_idx}.png"
-				cmp_path = os.path.join(cmp_dir, cmp_name)
-				_save_overlay_comparison(cmp_path, msk, hm, thr)
-				overlay_map[(img_idx, feat_idx)] = os.path.relpath(cmp_path, start=export_root)
-
-		rows_sorted = sorted(rows, key=lambda r: r.get("iou", 0.0), reverse=True)
-		# Füge overlay_path für Best-Items ein
-		for r in rows_sorted:
-			key = (int(r["image_idx"]), int(r["feature_idx"]))
-			if key in overlay_map:
-				r["overlay_path"] = overlay_map[key]
-
 		layer_dir = os.path.join(export_root, f"layer{lidx}")
 		_ensure_dir(layer_dir)
-		csv_path = os.path.join(layer_dir, "iou_sorted.csv")
-		_write_csv(csv_path, rows_sorted)
 
-	if count == 0:
-		print("Keine Daten gefunden. Bitte zuvor die Extraktion ausführen.")
-	else:
-		print(f"Export abgeschlossen. Root: {export_root}")
+		# Overlays für beste(s) Feature(s) - ALLE Bilder visualisieren
+		best = per_layer_best.get(lidx)
+		overlay_map: Dict[int, str] = {}  # feature_idx -> overlay_dir
+		if best is not None:
+			features = best.get("features", [])  # type: ignore
+			for feat_info in features:  # type: ignore
+				fidx = int(feat_info["feature_idx"])  # type: ignore
+				thr = float(feat_info["threshold"])  # type: ignore
+				agg_best = feat_info["aggregator"]  # type: ignore
+
+				# Unterordner für dieses Feature
+				feat_dir = os.path.join(layer_dir, "network_dissection", f"Feature{fidx}")
+				_ensure_dir(feat_dir)
+
+				# Visualisiere ALLE Bilder dieses Features
+				for image_id, heatmap, mask in zip(agg_best.image_ids, agg_best.heatmaps, agg_best.masks):
+					overlay_path = os.path.join(feat_dir, f"{image_id}.png")
+					_save_overlay_comparison(overlay_path, mask, heatmap, thr)
+				
+				overlay_map[fidx] = os.path.relpath(feat_dir, start=export_root)
+
+		# Sortiere Rows nach mIoU absteigend
+		rows_sorted = sorted(rows, key=lambda r: r.get("miou", 0.0), reverse=True)
+		# Füge overlay_dir für Best-Features ein
+		for r in rows_sorted:
+			fidx = int(r["feature_idx"])
+			if fidx in overlay_map:
+				r["overlay_dir"] = overlay_map[fidx]
+
+		# Schreibe mIoU-CSV
+		csv_path = os.path.join(layer_dir, "miou_network_dissection.csv")
+		_write_network_dissection_csv(csv_path, rows_sorted)
+
+	print(f"Network Dissection Export abgeschlossen. Root: {export_root}")
 
 
-
-def main_print_all() -> None:
-	"""Berechnet und druckt alle IoUs inkl. Layer-, Bild- und Feature-Zuordnung.
-
-	Ausgabe pro Level in der Form:
-	Layer=<L> Bild=<B> Feature=<F> Level=<LVL> map=<HxW> thr=<T> IoU=<IOU> pos=<N>
-	"""
-	# Import hier durchführen, damit Skript sowohl als Modul als auch direkt lauffähig ist
-	try:
-		from .iou_core import compute_iou_per_levels  # type: ignore
-	except Exception:
-		# Fallback, wenn als Skript ohne Paketstruktur ausgeführt
-		import os as _os, sys as _sys
-		_sys.path.append(_os.path.dirname(__file__))
-		from iou_core import compute_iou_per_levels  # type: ignore
-	count = 0
-	for item in iter_iou_inputs():
-		results = compute_iou_per_levels(
-			item,
-			threshold_method="percentile",
-			threshold_value=80.0,
-			threshold_absolute=None,
-		)
-		for r in results:
-			print(
-				f"Layer={r.layer_idx} Bild={r.image_idx} Feature={r.feature_idx} "
-				f"Level={r.level_idx} map={r.map_shape} thr={r.threshold:.4f} "
-				f"IoU={r.iou:.6f} pos={r.positives}"
-			)
-			count += 1
-	if count == 0:
-		print("Keine Daten gefunden. Bitte zuvor die Extraktion ausführen.")
+def _write_network_dissection_csv(path: str, rows: List[Dict[str, object]]) -> None:
+	"""Schreibt Network Dissection mIoU-Ergebnisse in CSV."""
+	if not rows:
+		return
+	fieldnames = [
+		"layer_idx",
+		"feature_idx",
+		"miou",
+		"nd_threshold",
+		"n_images",
+		"individual_ious",
+		"overlay_dir",
+	]
+	with open(path, "w", encoding="utf-8", newline="") as f:
+		writer = csv.DictWriter(f, fieldnames=fieldnames)
+		writer.writeheader()
+		writer.writerows(rows)
 
 
 if __name__ == "__main__":
-	# Exportiere kombinierte Heatmaps & IoUs pro Layer
-	main_export_combined()
+	# Network Dissection Pipeline mit per-Feature Thresholding
+	main_export_network_dissection()
+
+
+
 

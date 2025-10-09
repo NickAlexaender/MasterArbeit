@@ -55,6 +55,11 @@ if maskdino_path not in sys.path:
     sys.path.insert(0, maskdino_path)
 from maskdino import add_maskdino_config
 
+# myThesis-Repo zum Pfad hinzufügen
+mythesis_path = "/Users/nicklehmacher/Alles/MasterArbeit"
+if mythesis_path not in sys.path:
+    sys.path.insert(0, mythesis_path)
+
 # Übergabe-Funktion importieren (Baustein 2)
 # Import der Übergabe-Funktion aus der Nachbar-Datei
 from myThesis.encoder.weights_extraction_transformer_encoder import accept_weights_model_images
@@ -178,11 +183,22 @@ def build_model_and_load_weights(weights_path: str) -> torch.nn.Module:
 
 
 def gather_images() -> List[str]:
-    """Stellt eine Liste von Bildpfaden zusammen (aktuell: ein Beispielbild)."""
-    candidates = [
-        "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/new_21_png_jpg.rf.d0c9323560db430e693b33b36cb84c3b.jpg",
-    ]
-    return [p for p in candidates if os.path.exists(p)]
+    """Stellt eine Liste von Bildpfaden zusammen aus dem rot-Verzeichnis."""
+    image_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/rot"
+    
+    if not os.path.exists(image_dir):
+        print(f"⚠️ Verzeichnis nicht gefunden: {image_dir}")
+        return []
+    
+    # Alle Bilddateien aus dem rot-Verzeichnis sammeln
+    image_files = []
+    for filename in os.listdir(image_dir):
+        if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+            full_path = os.path.join(image_dir, filename)
+            image_files.append(full_path)
+    
+    print(f"📁 Gefundene Bilder in {image_dir}: {len(image_files)}")
+    return sorted(image_files)  # Sortiert für konsistente Reihenfolge
 
 
 def main():

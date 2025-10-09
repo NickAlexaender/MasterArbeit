@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import os
+import shutil
 from PIL import Image
 
 def get_color_ranges():
@@ -501,36 +502,105 @@ def create_color_visualization_grid(original_image_path, masks_dict, output_path
     cv2.imwrite(output_path, visualization)
     print(f"Farbgitter-Visualisierung gespeichert unter: {output_path}")
 
-if __name__ == "__main__":
+def process_all_images():
+    """
+    Verarbeitet alle Bilder aus dem 1images Ordner und speichert die Farbmasken
+    in die entsprechenden Farbordner.
+    """
     # Pfade definieren
-    input_image = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/new_21_png_jpg.rf.d0c9323560db430e693b33b36cb84c3b.jpg"
-    output_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/colours"
+    input_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/1images"
+    base_output_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image"
     
-    # Ausgabeordner erstellen falls nicht vorhanden
-    os.makedirs(output_dir, exist_ok=True)
+    # Alle Farbordner
+    color_folders = ['blau', 'braun', 'cyan', 'gelb', 'grau', 'grün', 'lila', 
+                     'orange', 'pink', 'rot', 'schwarz', 'weiss']
+    
+    # Erstelle alle Ausgabeordner falls nicht vorhanden
+    for color_folder in color_folders:
+        os.makedirs(os.path.join(base_output_dir, color_folder), exist_ok=True)
+    
+    # Finde alle Bilder im Input-Ordner
+    if not os.path.exists(input_dir):
+        print(f"FEHLER: Ordner nicht gefunden: {input_dir}")
+        return
+    
+    image_files = sorted([f for f in os.listdir(input_dir) 
+                         if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+    
+    if not image_files:
+        print(f"Keine Bilder gefunden in: {input_dir}")
+        return
     
     print("=== Farbmasken-Extraktion für Network Dissection ===")
-    print(f"Verarbeite Bild: {os.path.basename(input_image)}")
-    print(f"Ausgabeordner: {output_dir}")
+    print(f"Gefundene Bilder: {len(image_files)}")
+    print(f"Input-Ordner: {input_dir}")
+    print(f"Output-Basisordner: {base_output_dir}")
     print()
     
-    # Alle Farbmasken extrahieren (exklusiv)
-    extracted_masks = extract_all_color_masks_exclusive(input_image, output_dir)
+    # Verarbeite jedes Bild
+    total_processed = 0
+    for idx, image_file in enumerate(image_files, 1):
+        input_image_path = os.path.join(input_dir, image_file)
+        
+        print(f"\n{'='*70}")
+        print(f"Verarbeite Bild {idx}/{len(image_files)}: {image_file}")
+        print(f"{'='*70}")
+        
+        # Temporärer Ordner für die Masken dieses Bildes
+        temp_output_dir = os.path.join(base_output_dir, "temp_masks")
+        os.makedirs(temp_output_dir, exist_ok=True)
+        
+        try:
+            # Alle Farbmasken extrahieren (exklusiv)
+            extracted_masks = extract_all_color_masks_exclusive(input_image_path, temp_output_dir)
+            
+            # Verschiebe jede Maske in den entsprechenden Farbordner
+            # Mapping von internen Farbnamen zu Ordnernamen
+            color_mapping = {
+                'rot': 'rot',
+                'gruen': 'grün',
+                'blau': 'blau',
+                'gelb': 'gelb',
+                'orange': 'orange',
+                'lila': 'lila',
+                'cyan': 'cyan',
+                'pink': 'pink',
+                'braun': 'braun',
+                'schwarz': 'schwarz',
+                'weiss': 'weiss',
+                'grau': 'grau'
+            }
+            
+            for color, temp_mask_path in extracted_masks.items():
+                if color in color_mapping:
+                    target_folder = color_mapping[color]
+                    target_path = os.path.join(base_output_dir, target_folder, image_file)
+                    
+                    # Kopiere Maske in Zielordner
+                    if os.path.exists(temp_mask_path):
+                        shutil.copy2(temp_mask_path, target_path)
+                        print(f"  ✓ {color.capitalize()} -> {target_folder}/{image_file}")
+            
+            total_processed += 1
+            print(f"\n✓ Bild erfolgreich verarbeitet: {image_file}")
+            
+        except Exception as e:
+            print(f"\n✗ FEHLER beim Verarbeiten von {image_file}: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        finally:
+            # Lösche temporäre Masken
+            if os.path.exists(temp_output_dir):
+                shutil.rmtree(temp_output_dir)
     
-    print(f"\n=== Zusammenfassung ===")
-    print(f"Erfolgreich extrahierte Farbmasken: {len(extracted_masks)}")
-    for color, path in extracted_masks.items():
-        print(f"  {color.capitalize()}: {os.path.basename(path)}")
-    
-    # Gitter-Visualisierung erstellen
-    if extracted_masks:
-        grid_visualization = os.path.join(output_dir, "alle_farben_grid.png")
-        create_color_visualization_grid(input_image, extracted_masks, grid_visualization)
-    
-    print(f"\nFarbextraktion abgeschlossen!")
-    print(f"Alle Masken gespeichert in: {output_dir}")
-    
-    # Kompatibilität: Rote Maske auch als rot.png verfügbar machen (falls nicht schon vorhanden)
-    if 'rot' in extracted_masks:
-        print(f"Rote Maske für Network Dissection: {extracted_masks['rot']}")
+    print(f"\n{'='*70}")
+    print(f"=== ZUSAMMENFASSUNG ===")
+    print(f"{'='*70}")
+    print(f"Erfolgreich verarbeitet: {total_processed}/{len(image_files)} Bilder")
+    print(f"Farbmasken gespeichert in: {base_output_dir}/[farbname]/")
+    print("\nFarbextraktion abgeschlossen!")
+
+if __name__ == "__main__":
+    process_all_images()
 

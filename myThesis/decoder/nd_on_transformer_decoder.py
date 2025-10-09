@@ -271,12 +271,24 @@ def build_model_and_load_weights(weights_path: str) -> Tuple[torch.nn.Module, Li
 	return model, classes
 
 
-def gather_images() -> List[str]:
-	"""Stellt eine Liste von Bildpfaden zusammen (aktuell: ein Beispielbild)."""
-	candidates = [
-		"/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/new_21_png_jpg.rf.d0c9323560db430e693b33b36cb84c3b.jpg",
-	]
-	return [p for p in candidates if os.path.exists(p)]
+def gather_images() -> List[Tuple[str, str]]:
+	"""
+	Stellt eine Liste von (image_id, image_path) Tupeln zusammen.
+	image_id wird aus dem Dateinamen extrahiert (z.B. "image 1.jpg" -> "image_1")
+	"""
+	image_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/rot"
+	candidates = []
+	
+	# Durchsuche das rot-Verzeichnis nach Bilddateien
+	if os.path.exists(image_dir):
+		for filename in os.listdir(image_dir):
+			if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+				full_path = os.path.join(image_dir, filename)
+				# Extrahiere image_id aus Dateinamen (ohne Erweiterung, Leerzeichen durch _ ersetzen)
+				image_id = os.path.splitext(filename)[0].replace(" ", "_")
+				candidates.append((image_id, full_path))
+	
+	return sorted(candidates, key=lambda x: x[1])
 
 
 # --- Vertragsbeschreibung (für zu implementierende Funktionen) ---

@@ -28,7 +28,7 @@ Kombiniert-IoU: sagt dir, ob die Unit insgesamt (über alle Skalen hinweg) zuver
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -43,63 +43,16 @@ except Exception:  # pragma: no cover
 # -----------------------------
 
 @dataclass
-class IoUResult:
-	layer_idx: int
-	image_idx: int
-	feature_idx: int
-	level_idx: int
-	map_shape: Tuple[int, int]
-	threshold: float
-	iou: float
-	positives: int
-	# Optional: die auf Inputgröße hochskalierte, kontinuierliche Heatmap (float32)
-	# Dies entspricht genau der Karte, die anschließend binarisiert wird.
-	heatmap: Optional[np.ndarray] = None
-
-
-@dataclass
 class IoUCombinedResult:
 	"""Ergebnis für eine kombinierte Heatmap über alle Levels (auf Inputgröße)."""
 	layer_idx: int
-	image_idx: int
+	image_id: str  # String-ID (z.B. "image 1") statt numerischer Index
 	feature_idx: int
 	map_shape: Tuple[int, int]  # entspricht input_size (Hin, Win)
 	threshold: float
 	iou: float
 	positives: int
 	heatmap: Optional[np.ndarray] = None
-
-
-# -----------------------------
-# Helper: Eingabe entpacken
-# -----------------------------
-
-def unpack_iou_input(
-	item: Union[
-		Tuple[int, int, int, np.ndarray, Dict, np.ndarray],  # build_iou_core_input
-		Any,  # direkte Struktur aus calculate_IoU (IoUInput)
-	]
-) -> Tuple[int, int, int, np.ndarray, Dict, np.ndarray]:
-	"""Akzeptiert entweder das Tupel aus `build_iou_core_input` oder ein IoUInput-ähnliches Objekt.
-
-	Verzichtet auf Modul-Importe und nutzt Attributprüfung (Duck-Typing),
-	damit der Aufruf sowohl innerhalb eines Pakets als auch als Skript funktioniert.
-	"""
-	if isinstance(item, tuple) and len(item) == 6:
-		return item  # already in canonical form
-
-	# Duck-Typing: prüfe erforderliche Attribute
-	required_attrs = ("layer_idx", "image_idx", "feature_idx", "tokens", "shapes", "mask_input")
-	if all(hasattr(item, a) for a in required_attrs):
-		return (
-			int(getattr(item, "layer_idx")),
-			int(getattr(item, "image_idx")),
-			int(getattr(item, "feature_idx")),
-			np.asarray(getattr(item, "tokens")),
-			dict(getattr(item, "shapes")),
-			np.asarray(getattr(item, "mask_input")),
-		)
-	raise TypeError("Unsupported input type for iou_core: expected 6-tuple or object with layer_idx,image_idx,feature_idx,tokens,shapes,mask_input")
 
 
 # -----------------------------
@@ -165,6 +118,34 @@ def combine_level_maps_to_input(
 	return combined.astype(np.float32, copy=False)
 
 
+def unpack_iou_input(
+	item: Union[
+		Tuple[int, str, int, np.ndarray, Dict, np.ndarray],  # build_iou_core_input
+		Any,  # direkte Struktur aus calculate_IoU (IoUInput)
+	]
+) -> Tuple[int, str, int, np.ndarray, Dict, np.ndarray]:
+	"""Akzeptiert entweder das Tupel aus `build_iou_core_input` oder ein IoUInput-ähnliches Objekt.
+
+	Verzichtet auf Modul-Importe und nutzt Attributprüfung (Duck-Typing),
+	damit der Aufruf sowohl innerhalb eines Pakets als auch als Skript funktioniert.
+	"""
+	if isinstance(item, tuple) and len(item) == 6:
+		return item  # already in canonical form
+
+	# Duck-Typing: prüfe erforderliche Attribute
+	required_attrs = ("layer_idx", "image_id", "feature_idx", "tokens", "shapes", "mask_input")
+	if all(hasattr(item, a) for a in required_attrs):
+		return (
+			int(getattr(item, "layer_idx")),
+			str(getattr(item, "image_id")),
+			int(getattr(item, "feature_idx")),
+			np.asarray(getattr(item, "tokens")),
+			dict(getattr(item, "shapes")),
+			np.asarray(getattr(item, "mask_input")),
+		)
+	raise TypeError("Unsupported input type for iou_core: expected 6-tuple or object with layer_idx,image_id,feature_idx,tokens,shapes,mask_input")
+
+
 def binarize_map(
 	m: np.ndarray,
 	method: str = "percentile",
@@ -206,47 +187,11 @@ def iou_from_masks(a: np.ndarray, b: np.ndarray) -> float:
 
 
 # -----------------------------
-# Hauptfunktion pro Eintrag
+# Hauptfunktionen
 # -----------------------------
 
-def compute_iou_per_levels(
-	item: Union[Tuple[int, int, int, np.ndarray, Dict, np.ndarray], Any],
-	threshold_method: str = "percentile",
-	threshold_value: float = 80.0,
-	threshold_absolute: Optional[float] = None,
-	return_heatmap: bool = False,
-) -> List[IoUResult]:
-	"""Berechnet IoU zwischen Featureaktivierung (pro Level) und maske (input_size).
-
-	Rückgabe: Liste IoUResult – ein Eintrag pro Level.
-	"""
-	layer_idx, image_idx, feature_idx, tokens, shapes, mask_input = unpack_iou_input(item)
-	maps = tokens_to_level_maps(tokens, shapes)
-	Hin, Win = int(shapes["input_size"][0]), int(shapes["input_size"][1])
-
-	results: List[IoUResult] = []
-	for lidx, m in enumerate(maps):
-		m_up = resize_to_input(m, (Hin, Win))
-		bin_m, thr = binarize_map(m_up, method=threshold_method, value=threshold_value, absolute=threshold_absolute)
-		iou = iou_from_masks(bin_m, mask_input)
-		results.append(
-			IoUResult(
-				layer_idx=layer_idx,
-				image_idx=image_idx,
-				feature_idx=feature_idx,
-				level_idx=lidx,
-				map_shape=m.shape,
-				threshold=thr,
-				iou=iou,
-				positives=int(bin_m.sum()),
-				heatmap=(m_up if return_heatmap else None),
-			)
-		)
-	return results
-
-
 def compute_iou_combined(
-	item: Union[Tuple[int, int, int, np.ndarray, Dict, np.ndarray], Any],
+	item: Union[Tuple[int, str, int, np.ndarray, Dict, np.ndarray], Any],
 	threshold_method: str = "percentile",
 	threshold_value: float = 80.0,
 	threshold_absolute: Optional[float] = None,
@@ -259,14 +204,14 @@ def compute_iou_combined(
 	- Binarisiert die kombinierte Heatmap gemäß Threshold-Strategie.
 	- Berechnet die IoU gegen mask_input.
 	"""
-	layer_idx, image_idx, feature_idx, tokens, shapes, mask_input = unpack_iou_input(item)
+	layer_idx, image_id, feature_idx, tokens, shapes, mask_input = unpack_iou_input(item)
 	Hin, Win = int(shapes["input_size"][0]), int(shapes["input_size"][1])
 	heatmap = combine_level_maps_to_input(tokens, shapes, combine=combine)
 	bin_m, thr = binarize_map(heatmap, method=threshold_method, value=threshold_value, absolute=threshold_absolute)
 	iou = iou_from_masks(bin_m, mask_input)
 	return IoUCombinedResult(
 		layer_idx=layer_idx,
-		image_idx=image_idx,
+		image_id=image_id,
 		feature_idx=feature_idx,
 		map_shape=(Hin, Win),
 		threshold=thr,
@@ -277,32 +222,47 @@ def compute_iou_combined(
 
 
 # -----------------------------
-# Optional: kleiner Runner
+# Neue Funktionen für globale Binarisierung
 # -----------------------------
 
-def _main_preview(limit: int = 5) -> None:
-	try:
-		from .calculate_IoU_for_encoder import iter_iou_inputs
-	except Exception as e:  # pragma: no cover
-		print(f"Konnte iter_iou_inputs nicht importieren: {e}")
-		return
+def generate_heatmap_only(
+	item: Union[Tuple[int, str, int, np.ndarray, Dict, np.ndarray], Any],
+	combine: str = "max",
+) -> np.ndarray:
+	"""Erzeugt ausschließlich die kontinuierliche Heatmap (OHNE Binarisierung/IoU).
 
-	count = 0
-	for item in iter_iou_inputs():
-		res = compute_iou_per_levels(item, threshold_method="percentile", threshold_value=80)
-		for r in res:
-			print(
-				f"Layer={r.layer_idx} Bild={r.image_idx} Feature={r.feature_idx} Level={r.level_idx} "
-				f"map={r.map_shape} thr={r.threshold:.4f} IoU={r.iou:.4f} pos={r.positives}"
-			)
-		count += 1
-		if count >= limit:
-			break
-	if count == 0:
-		print("Keine Einträge gefunden. Bitte vorher calculate_IoU ausführen.")
+	Verwendungszweck: Sammeln aller Heatmaps eines Features für globale Binarisierung.
+
+	Args:
+		item: IoUInput-Tupel oder -Objekt
+		combine: Kombinationsmethode für Multi-Level ('max'|'sum'|'mean')
+
+	Returns:
+		np.ndarray: Kontinuierliche Heatmap in Inputgröße (H_in, W_in), dtype=float32
+	"""
+	layer_idx, image_id, feature_idx, tokens, shapes, mask_input = unpack_iou_input(item)
+	heatmap = combine_level_maps_to_input(tokens, shapes, combine=combine)
+	return heatmap
 
 
-if __name__ == "__main__":  # pragma: no cover
-	_main_preview()
+def compute_iou_from_heatmap(
+	heatmap: np.ndarray,
+	mask_input: np.ndarray,
+	threshold: float,
+) -> float:
+	"""Berechnet IoU zwischen binarisierter Heatmap und Ground-Truth-Maske.
+
+	Args:
+		heatmap: Kontinuierliche Aktivierungskarte (H, W) float32
+		mask_input: Binäre Ground-Truth-Maske (H, W) bool
+		threshold: Absoluter Schwellenwert für Binarisierung
+
+	Returns:
+		float: IoU-Wert [0, 1]
+	"""
+	if heatmap.shape != mask_input.shape:
+		raise ValueError(f"Shape-Mismatch: Heatmap {heatmap.shape} vs. Maske {mask_input.shape}")
+	bin_heatmap = heatmap >= threshold
+	return iou_from_masks(bin_heatmap, mask_input)
 
 

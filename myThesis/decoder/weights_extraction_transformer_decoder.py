@@ -44,12 +44,15 @@ def register_decoder_hooks(model: torch.nn.Module) -> Tuple[Dict[str, List[torch
 
 
 def extract_pixel_embedding_map(model: torch.nn.Module, batched_input: Dict[str, Any], 
-                               image_index: int, output_dir: str) -> Optional[np.ndarray]:
+                               image_id: str, output_dir: str) -> Optional[np.ndarray]:
     """
     Extrahiert Pixel-Embedding-Map für Network Dissection mit korrektem MaskDINO-Input.
+    
+    Args:
+        image_id: Eindeutige ID für das Bild (z.B. "image_1")
     """
     if batched_input is None:
-        print(f"⚠️  Kein Input für Pixel-Embedding-Extraktion bei Bild {image_index}")
+        print(f"⚠️  Kein Input für Pixel-Embedding-Extraktion bei Bild {image_id}")
         return None
     
     encoder_features = {}
@@ -111,23 +114,30 @@ def extract_pixel_embedding_map(model: torch.nn.Module, batched_input: Dict[str,
             # Speichere für Network Dissection
             os.makedirs(os.path.join(output_dir, "pixel_embeddings"), exist_ok=True)
             
-            # Speichere als NPY
-            npy_path = os.path.join(output_dir, "pixel_embeddings", f"pixel_embed_Bild{image_index:04d}.npy")
+            # Speichere als NPY mit image_id
+            npy_path = os.path.join(output_dir, "pixel_embeddings", f"pixel_embed_{image_id}.npy")
             np.save(npy_path, pixel_embedding_map)
             
             # Speichere Metadaten
             metadata = {
-                "image_index": image_index,
+                "image_id": image_id,  # Neue eindeutige ID
+                "embedding_id": f"embed_{image_id}",  # Embedding-ID für spätere Zuordnung
                 "layer_name": best_layer_name,
                 "shape": list(pixel_embedding_map.shape),
                 "channels": int(pixel_embedding_map.shape[0]),
                 "height": int(pixel_embedding_map.shape[1]),
                 "width": int(pixel_embedding_map.shape[2]),
-                "npy_file": f"pixel_embed_Bild{image_index:04d}.npy"
+                "npy_file": f"pixel_embed_{image_id}.npy",
+                # Zusätzliche Felder für exakte Skalierung
+                "embed_h": int(pixel_embedding_map.shape[1]),
+                "embed_w": int(pixel_embedding_map.shape[2]),
+                "input_h": 800,  # MaskDINO Standard
+                "input_w": 800,
+                "stride": 32
             }
             
             import json
-            metadata_path = os.path.join(output_dir, "pixel_embeddings", f"metadata_Bild{image_index:04d}.json")
+            metadata_path = os.path.join(output_dir, "pixel_embeddings", f"metadata_{image_id}.json")
             with open(metadata_path, 'w') as f:
                 json.dump(metadata, f, indent=2)
             
@@ -136,7 +146,7 @@ def extract_pixel_embedding_map(model: torch.nn.Module, batched_input: Dict[str,
             print(f"   📋 Metadaten: {os.path.basename(metadata_path)}")
             
         else:
-            print(f"⚠️  Keine geeignete Pixel-Embedding-Map für Bild {image_index} gefunden.")
+            print(f"⚠️  Keine geeignete Pixel-Embedding-Map für Bild {image_id} gefunden.")
             if encoder_features:
                 print("Verfügbare Features:")
                 for name, features in encoder_features.items():
@@ -150,15 +160,18 @@ def extract_pixel_embedding_map(model: torch.nn.Module, batched_input: Dict[str,
         # Cleanup Hooks bei Fehler
         for handle in hook_handles:
             handle.remove()
-        print(f"❌ Fehler bei Pixel-Embedding-Extraktion für Bild {image_index}: {str(e)}")
+        print(f"❌ Fehler bei Pixel-Embedding-Extraktion für Bild {image_id}: {str(e)}")
         return None
 
 
 def save_queries_to_csv(hidden_states_per_layer: Dict[str, List[torch.Tensor]], 
-                       num_queries: int, image_index: int, output_dir: str):
+                       num_queries: int, image_id: str, output_dir: str):
     """
     Speichert Query-Embeddings pro Layer in organisierter Struktur.
     Format: layer0/Query.csv, layer1/Query.csv, etc. mit allen Bildern in einer Datei.
+    
+    Args:
+        image_id: Eindeutige ID für das Bild (z.B. "image_1")
     """
     
     for layer_name, hidden_states_list in hidden_states_per_layer.items():
@@ -234,7 +247,7 @@ def save_queries_to_csv(hidden_states_per_layer: Dict[str, List[torch.Tensor]],
             
             # Schreibe alle Queries für dieses Bild
             for query_idx in range(num_queries_actual):
-                query_name = f'"Bild{image_index + 1}, Query{query_idx + 1}"'  # +1 für 1-basierte Nummerierung
+                query_name = f'"{image_id}, Query{query_idx + 1}"'  # Mit image_id und 1-basierte Query-Nummerierung
                 weights = queries[query_idx, :]
                 
                 # Formatiere Gewichte als kommagetrennte Liste
@@ -245,7 +258,7 @@ def save_queries_to_csv(hidden_states_per_layer: Dict[str, List[torch.Tensor]],
                 f.write(line + '\n')
         
         print(f"✅ {'Erweitert' if file_exists else 'Erstellt'}: {layer_number}/Query.csv")
-        print(f"   � Bild {image_index + 1}: {num_queries_actual} Queries x {hidden_dim} Gewichte")
+        print(f"   📊 {image_id}: {num_queries_actual} Queries x {hidden_dim} Gewichte")
         print(f"   📂 Pfad: {csv_path}")
         
         # Keine Metadaten-JSONs mehr erstellen
@@ -287,11 +300,14 @@ def load_and_preprocess_image(image_path: str) -> Optional[Dict[str, torch.Tenso
 
 
 def accept_weights_model_images(weights_path: str, model: torch.nn.Module, 
-                               image_list: List[str], num_queries: int = 300,  # Geändert von 100 auf 300
+                               image_list: List[Tuple[str, str]], num_queries: int = 300,  # Geändert: Liste von (image_id, image_path)
                                output_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/decoder") -> Dict[str, Any]:
     """
     Hauptfunktion für Network Dissection auf Transformer-Decoder.
     Extrahiert Queries pro Layer (CSV) und Pixel-Embedding-Maps (NPY).
+    
+    Args:
+        image_list: Liste von (image_id, image_path) Tupeln
     """
     print(f"Starte Network Dissection Datenextraktion für {len(image_list)} Bilder...")
     
@@ -312,8 +328,8 @@ def accept_weights_model_images(weights_path: str, model: torch.nn.Module,
     results = {"processed": 0, "failed": 0}
     
     try:
-        for img_idx, image_path in enumerate(image_list):
-            print(f"Verarbeite Bild {img_idx + 1}/{len(image_list)}: {os.path.basename(image_path)}")
+        for image_id, image_path in image_list:
+            print(f"Verarbeite {image_id}: {os.path.basename(image_path)}")
             
             try:
                 # Lade Bild
@@ -326,21 +342,21 @@ def accept_weights_model_images(weights_path: str, model: torch.nn.Module,
                 for layer_states in hidden_states_per_layer.values():
                     layer_states.clear()
                 
-                # 1. Extrahiere Pixel-Embedding-Map (wieder aktiviert)
-                extract_pixel_embedding_map(model, batched_input, img_idx, output_dir)
+                # 1. Extrahiere Pixel-Embedding-Map mit image_id
+                extract_pixel_embedding_map(model, batched_input, image_id, output_dir)
                 
                 # 2. Forward-Pass für Decoder-Hidden-States mit korrektem Input-Format
                 with torch.no_grad():
                     _ = model([batched_input])  # Liste von Inputs wie erwartet
                 
-                # 3. Speichere Queries als CSV
-                save_queries_to_csv(hidden_states_per_layer, num_queries, img_idx, output_dir)
+                # 3. Speichere Queries als CSV mit image_id
+                save_queries_to_csv(hidden_states_per_layer, num_queries, image_id, output_dir)
                 
                 results["processed"] += 1
-                print(f"✅ Bild {img_idx} erfolgreich verarbeitet")
+                print(f"✅ {image_id} erfolgreich verarbeitet")
                 
             except Exception as e:
-                print(f"❌ Fehler beim Verarbeiten von Bild {img_idx}: {str(e)}")
+                print(f"❌ Fehler beim Verarbeiten von {image_id}: {str(e)}")
                 results["failed"] += 1
                 continue
                 

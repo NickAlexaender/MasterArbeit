@@ -348,18 +348,21 @@ def accept_weights_model_images(weights_path: str, model: torch.nn.Module, image
     per_layer_header: Dict[int, List[str]] = {}
 
     # Layer aus allen Ergebnissen einsammeln (stabile Sortierung über Index)
-    # Mapping von layer_idx -> list of (image_idx, arr)
-    layer_to_items: Dict[int, List[Tuple[int, np.ndarray]]] = {}
+    # Mapping von layer_idx -> list of (image_id, arr)
+    # WICHTIG: Verwende image_id (z.B. "image 1") statt numerischer Index für korrekte Zuordnung
+    layer_to_items: Dict[int, List[Tuple[str, np.ndarray]]] = {}
     layer_index_regex = re.compile(r"\.encoder\.layers\.(\d+)")
 
-    for img_idx, img_path in enumerate(image_list, start=1):
+    for img_path in image_list:
+        # Extrahiere image_id aus Dateinamen (identisch zu Zeile 243 oben)
+        image_id = os.path.splitext(os.path.basename(img_path))[0]
         layer_outputs = results.get(img_path, {})
         for layer_name, arr in layer_outputs.items():
             m = layer_index_regex.search(layer_name)
             if not m:
                 continue
             lidx = int(m.group(1))
-            layer_to_items.setdefault(lidx, []).append((img_idx, arr))
+            layer_to_items.setdefault(lidx, []).append((image_id, arr))
 
     for lidx in sorted(layer_to_items.keys()):
         rows: List[List[Any]] = []
@@ -374,7 +377,7 @@ def accept_weights_model_images(weights_path: str, model: torch.nn.Module, image
         else:
             header += ["Gewicht 1"]
 
-        for img_idx, arr in items:
+        for image_id, arr in items:
             B, D, N, out = to_bdn(arr)
             if D != 256:
                 print(f"⚠️ Layer {lidx}: Feature-Dim={D}≠256 – exportiere dennoch.")
@@ -383,7 +386,8 @@ def accept_weights_model_images(weights_path: str, model: torch.nn.Module, image
                 # häufig B==1; bei >1 exportiere nur erstes Element und warnen
                 print(f"ℹ️ Layer {lidx}: Batchgröße {B} – exportiere nur b=0.")
             for fidx in range(D):
-                name = f"Bild{img_idx}, Feature{fidx+1}"
+                # Verwende image_id (z.B. "image 1") statt generischen Index
+                name = f"{image_id}, Feature{fidx+1}"
                 values = out[0, fidx, :].tolist()
                 rows.append([name] + values)
 

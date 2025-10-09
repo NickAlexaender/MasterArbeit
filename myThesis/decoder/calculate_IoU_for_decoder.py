@@ -5,7 +5,8 @@ Basiert auf Decoder-spezifischen Daten:
 - Iteriert über output/decoder/layer*/Query.csv
 - Extrahiert Layer-, Bild- und Query-Index sowie Query-Features (pro Zeile)  
 - Lädt passende Pixel-Embeddings aus output/decoder/pixel_embeddings/
-- Bereitet die Maske aus myThesis/image/colours/rot.png in entsprechender Größe vor
+- Bereitet die Masken aus myThesis/image/rot/ in entsprechender Größe vor
+- Verarbeitet mehrere Bilder aus myThesis/image/1images/
 
 Ergebnis: Generator, der iou_core_decoder mit allen benötigten Inputs versorgt.
 """
@@ -16,8 +17,7 @@ import os
 import re
 import csv
 import json
-from dataclasses import dataclass
-from typing import Dict, Generator, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -40,8 +40,9 @@ def _decoder_out_dir() -> str:
     return os.path.join(_project_root(), "output", "decoder")
 
 
-def _mask_path() -> str:
-    return os.path.join(_project_root(), "image", "colours", "rot.png")
+def _mask_dir() -> str:
+    """Gibt den Ordner mit den Ground-Truth-Masken zurück."""
+    return os.path.join(_project_root(), "image", "rot")
 
 
 def _find_layer_csvs() -> List[Tuple[int, str]]:
@@ -71,7 +72,7 @@ def _load_all_pixel_embeddings() -> Dict[str, Dict]:
     Lädt alle verfügbaren metadata und pixel_embeddings.
     
     Returns:
-        { image_id: {"metadata": metadata_dict, "embedding": np.ndarray} }
+        { embedding_id: {"metadata": metadata_dict, "embedding": np.ndarray} }
     """
     pixel_embed_dir = os.path.join(_decoder_out_dir(), "pixel_embeddings")
     out: Dict[str, Dict] = {}
@@ -83,12 +84,6 @@ def _load_all_pixel_embeddings() -> Dict[str, Dict]:
     metadata_files = [f for f in os.listdir(pixel_embed_dir) if f.startswith("metadata_") and f.endswith(".json")]
     
     for metadata_file in metadata_files:
-        # Extrahiere image_id aus metadata_Bild0000.json
-        m = re.match(r"metadata_(Bild\d+)\.json$", metadata_file)
-        if not m:
-            continue
-        image_id = m.group(1)
-        
         metadata_path = os.path.join(pixel_embed_dir, metadata_file)
         try:
             with open(metadata_path, "r", encoding="utf-8") as f:
@@ -110,7 +105,18 @@ def _load_all_pixel_embeddings() -> Dict[str, Dict]:
         except Exception:
             continue
         
-        out[image_id] = {
+        # Nutze embedding_id als Schlüssel (sollte in metadata vorhanden sein)
+        embedding_id = metadata.get("embedding_id")
+        if not embedding_id:
+            # Fallback: Generiere aus image_id
+            image_id = metadata.get("image_id")
+            if image_id:
+                embedding_id = f"embed_{image_id}"
+            else:
+                # Letzter Fallback: verwende Dateinamen
+                embedding_id = os.path.splitext(metadata_file)[0].replace("metadata_", "embed_")
+        
+        out[embedding_id] = {
             "metadata": metadata,
             "embedding": embedding
         }
@@ -118,37 +124,35 @@ def _load_all_pixel_embeddings() -> Dict[str, Dict]:
     return out
 
 
-def _select_pixel_embedding_for(image_idx: int, all_embeddings: Dict[str, Dict]) -> Optional[Dict]:
+def _select_pixel_embedding_for(image_id: str, all_embeddings: Dict[str, Dict]) -> Optional[Dict]:
     """
-    Wählt passende Pixel-Embedding für den gegebenen Bild-Index.
+    Wählt passende Pixel-Embedding für die gegebene image_id.
+    
+    Args:
+        image_id: Eindeutige Bild-ID (z.B. "image_1")
+        all_embeddings: Dict mit allen verfügbaren Embeddings (key = embedding_id)
     
     Strategie:
-    1) Wenn es exakt eine Embedding gibt -> nimm diese
-    2) Versuche Match über Bild-Index im metadata
-    3) Fallback: alphabetisch sortieren und 1-basiert zuordnen
+    1) Exaktes Match über embedding_id = f"embed_{image_id}"
+    2) Match über image_id in metadata
     """
     if not all_embeddings:
         return None
     
-    if len(all_embeddings) == 1:
-        return next(iter(all_embeddings.values()))
+    # 1) Exaktes Match über embedding_id
+    expected_embedding_id = f"embed_{image_id}"
+    if expected_embedding_id in all_embeddings:
+        return all_embeddings[expected_embedding_id]
     
-    # 2) Match über image_index in metadata
-    matches = [v for v in all_embeddings.values() 
-              if int(v["metadata"].get("image_index", -1)) == int(image_idx - 1)]  # CSV ist 1-basiert, metadata 0-basiert
+    # 2) Suche über image_id in metadata
+    for embedding_id, embedding_data in all_embeddings.items():
+        metadata_image_id = embedding_data["metadata"].get("image_id")
+        if metadata_image_id == image_id:
+            return embedding_data
     
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        # Nicht eindeutig – wähle deterministisch erstes nach image_id
-        items = sorted(((k, v) for k, v in all_embeddings.items() if v in matches), 
-                      key=lambda kv: kv[0])
-        return items[0][1]
-    
-    # 3) Fallback: 1-basierte Reihenfolge über alphabetische Sortierung
-    items_sorted = sorted(all_embeddings.items(), key=lambda kv: kv[0])
-    idx0 = max(0, min(len(items_sorted) - 1, image_idx - 1))
-    return items_sorted[idx0][1]
+    # Kein Match gefunden
+    print(f"⚠️  Kein Pixel-Embedding gefunden für image_id='{image_id}'")
+    return None
 
 
 # -----------------------------
@@ -246,15 +250,50 @@ def _validate_input_size(input_size: Tuple[int, int], metadata: Dict) -> Tuple[i
     return (input_h, input_w)
 
 
-def _load_mask_for_input(input_size: Tuple[int, int]) -> np.ndarray:
-    """Lädt die Maske und liefert sie als bool-Array in input-Größe (H_in, W_in)."""
-    mask_file = _mask_path()
+def _load_mask_for_image(image_id: str, input_size: Tuple[int, int]) -> np.ndarray:
+    """
+    Lädt die Maske für das gegebene Bild und liefert sie als bool-Array in input-Größe (H_in, W_in).
+    
+    Args:
+        image_id: Eindeutige Bild-ID (z.B. "image_1")
+        input_size: Zielgröße (H, W)
+    
+    Returns:
+        mask_input: bool-Array mit Shape (H_in, W_in)
+    """
     if cv2 is None:
         raise RuntimeError("OpenCV (cv2) wird benötigt, ist aber nicht verfügbar.")
     
+    mask_dir = _mask_dir()
+    
+    # Konvertiere image_id zurück zu möglichen Dateinamen
+    # "image_1" -> versuche "image 1.jpg", "image 1.png", etc.
+    # Ersetze _ durch Leerzeichen für die Suche
+    search_name = image_id.replace("_", " ")
+    
+    # Versuche verschiedene Dateinamen-Konventionen
+    mask_file = None
+    for ext in ['.jpg', '.png', '.jpeg']:
+        # 1) Mit Leerzeichen: "image 1.jpg"
+        candidate = os.path.join(mask_dir, f"{search_name}{ext}")
+        if os.path.isfile(candidate):
+            mask_file = candidate
+            break
+        # 2) Ohne Leerzeichen: "image1.jpg"
+        candidate = os.path.join(mask_dir, f"{image_id}{ext}")
+        if os.path.isfile(candidate):
+            mask_file = candidate
+            break
+    
+    if mask_file is None or not os.path.isfile(mask_file):
+        raise FileNotFoundError(
+            f"Maske für {image_id} nicht gefunden. "
+            f"Gesucht in: {mask_dir} mit Muster: {search_name}.[jpg|png] oder {image_id}.[jpg|png]"
+        )
+    
     m = cv2.imread(mask_file, cv2.IMREAD_COLOR)
     if m is None:
-        raise FileNotFoundError(f"Maske nicht gefunden: {mask_file}")
+        raise FileNotFoundError(f"Maske konnte nicht geladen werden: {mask_file}")
     
     # In bool umwandeln und direkt auf input-Größe skalieren (nearest für binär)
     mask_bin = _prepare_mask_binary(m).astype(np.uint8)
@@ -267,12 +306,13 @@ def _load_mask_for_input(input_size: Tuple[int, int]) -> np.ndarray:
 # CSV-Iteration und Paketierung
 # -----------------------------
 
-_NAME_RE = re.compile(r"^Bild(\d+),\s*Query(\d+)$")
+# Regex für das neue CSV-Format mit image_id: "image_1, Query1"
+_NAME_RE = re.compile(r"^(.+),\s*Query(\d+)$")
 
 
-def _iter_csv_rows(csv_path: str) -> Iterable[Tuple[int, int, np.ndarray]]:
+def _iter_csv_rows(csv_path: str) -> Iterable[Tuple[str, int, np.ndarray]]:
     """
-    Iteriert Zeilen einer Query.csv und liefert (image_idx, query_idx, query_features).
+    Iteriert Zeilen einer Query.csv und liefert (image_id, query_idx, query_features).
     
     query_features ist ein 1D np.ndarray[256] float32.
     """
@@ -282,11 +322,11 @@ def _iter_csv_rows(csv_path: str) -> Iterable[Tuple[int, int, np.ndarray]]:
         for row in reader:
             if not row:
                 continue
-            name = row[0].strip()
+            name = row[0].strip().strip('"')  # Entferne führende/nachgestellte Anführungszeichen
             m = _NAME_RE.match(name)
             if not m:
                 continue
-            img_idx = int(m.group(1))
+            image_id = m.group(1).strip()  # z.B. "image_1"
             query_idx = int(m.group(2))
             try:
                 values = [float(x) for x in row[1:]]
@@ -294,14 +334,14 @@ def _iter_csv_rows(csv_path: str) -> Iterable[Tuple[int, int, np.ndarray]]:
                 # Überspringe fehlerhafte Zeilen
                 continue
             query_features = np.asarray(values, dtype=np.float32)
-            yield img_idx, query_idx, query_features
+            yield image_id, query_idx, query_features
 
 
 def iter_decoder_iou_inputs():
     """
     Haupt-Iterator: liefert pro CSV-Zeile ein DecoderIoUInput-Paket.
     - Erkennt Layer-Index aus Ordnernamen
-    - Mappt Bild-Index auf passende Pixel-Embeddings
+    - Mappt image_id auf passende Pixel-Embeddings
     - Bereitet Maske für Input-Size vor (gecacht pro input_size)
     """
     # Lazy-Import von iou_core_decoder für Kompatibilität
@@ -315,35 +355,313 @@ def iter_decoder_iou_inputs():
     layer_csvs = _find_layer_csvs()
     all_embeddings = _load_all_pixel_embeddings()
     
-    # Cache: Maske je input_size
-    mask_cache_input: Dict[Tuple[int, int], np.ndarray] = {}
+    # Cache: Maske je (image_id, input_size)
+    mask_cache: Dict[Tuple[str, Tuple[int, int]], np.ndarray] = {}
     
     for lidx, csv_path in layer_csvs:
-        for img_idx, query_idx, query_features in _iter_csv_rows(csv_path):
-            embedding_data = _select_pixel_embedding_for(img_idx, all_embeddings)
+        for image_id, query_idx, query_features in _iter_csv_rows(csv_path):
+            embedding_data = _select_pixel_embedding_for(image_id, all_embeddings)
             if embedding_data is None:
                 # Ohne Pixel-Embeddings ist IoU-Berechnung nicht möglich
+                print(f"⚠️  Kein Pixel-Embedding für {image_id} gefunden. Überspringe.")
                 continue
             
             input_size = _get_input_size_from_embedding(embedding_data)
             input_size = _validate_input_size(input_size, embedding_data["metadata"])
             
-            # Maske beschaffen (gecacht nach input-Größe)
-            if input_size in mask_cache_input:
-                mask_input = mask_cache_input[input_size]
+            # Maske beschaffen (gecacht nach (image_id, input_size))
+            cache_key = (image_id, input_size)
+            if cache_key in mask_cache:
+                mask_input = mask_cache[cache_key]
             else:
-                mask_input = _load_mask_for_input(input_size)
-                mask_cache_input[input_size] = mask_input
+                try:
+                    mask_input = _load_mask_for_image(image_id, input_size)
+                    mask_cache[cache_key] = mask_input
+                except FileNotFoundError as e:
+                    print(f"⚠️  {e}. Überspringe {image_id}.")
+                    continue
             
             yield DecoderIoUInput(
                 layer_idx=lidx,
-                image_idx=img_idx,
+                image_id=image_id,  # Geändert: image_id statt image_idx
                 query_idx=query_idx,
                 query_features=query_features,
                 pixel_embedding=embedding_data["embedding"],
                 input_size=input_size,
                 mask_input=mask_input,
             )
+
+
+# -----------------------------
+# Network Dissection: per-Query Thresholding
+# -----------------------------
+
+def compute_per_query_thresholds(percentile: float = 90.0) -> Dict[Tuple[int, int], float]:
+    """
+    Berechnet für jede Query den Threshold über alle Bilder.
+    
+    Args:
+        percentile: Perzentil-Wert für Threshold (Default: 99.5)
+    
+    Returns:
+        Dict[(layer_idx, query_idx)] -> threshold_value
+    
+    Strategie:
+    - Sammle alle Aktivationswerte (Response-Map-Werte) für jede Query über alle Bilder
+    - Berechne das X-Perzentil (z.B. 99.5) über alle gesammelten Werte
+    - Speichere den Threshold pro (layer_idx, query_idx)
+    """
+    # Lazy-Import
+    try:
+        from .iou_core_decoder import _compute_query_response_map  # type: ignore
+    except Exception:
+        import os as _os, sys as _sys
+        _sys.path.append(_os.path.dirname(__file__))
+        from iou_core_decoder import _compute_query_response_map  # type: ignore
+    
+    print(f"🔍 Berechne per-Query Thresholds (Perzentil: {percentile})...")
+    
+    # Sammle alle Aktivationswerte pro Query: (layer_idx, query_idx) -> List[float]
+    activation_values: Dict[Tuple[int, int], List[float]] = {}
+    
+    for item in iter_decoder_iou_inputs():
+        key = (item.layer_idx, item.query_idx)
+        
+        # Berechne Response-Map für diese Query/Bild-Kombination
+        response_map = _compute_query_response_map(
+            item.query_features,
+            item.pixel_embedding
+        )
+        
+        # Sammle alle Werte der Response-Map
+        values = response_map.flatten().tolist()
+        
+        if key not in activation_values:
+            activation_values[key] = []
+        activation_values[key].extend(values)
+    
+    # Berechne Threshold pro Query
+    thresholds: Dict[Tuple[int, int], float] = {}
+    for key, values in activation_values.items():
+        if len(values) > 0:
+            threshold = float(np.percentile(values, percentile))
+            thresholds[key] = threshold
+        else:
+            thresholds[key] = 0.0
+    
+    print(f"✅ {len(thresholds)} Query-Thresholds berechnet")
+    return thresholds
+
+
+def compute_mean_iou_per_query(
+    query_thresholds: Dict[Tuple[int, int], float]
+) -> Dict[int, List[Dict[str, object]]]:
+    """
+    Berechnet den durchschnittlichen IoU über alle Bilder für jede Query.
+    
+    Args:
+        query_thresholds: Dict[(layer_idx, query_idx)] -> threshold_value
+    
+    Returns:
+        Dict[layer_idx] -> List[{"query_idx": int, "mean_iou": float, "num_images": int}]
+    """
+    # Lazy-Imports
+    try:
+        from .iou_core_decoder import _compute_query_response_map, apply_per_query_binarization, _scale_to_input_size, _compute_iou  # type: ignore
+    except Exception:
+        import os as _os, sys as _sys
+        _sys.path.append(_os.path.dirname(__file__))
+        from iou_core_decoder import _compute_query_response_map, apply_per_query_binarization, _scale_to_input_size, _compute_iou  # type: ignore
+    
+    print(f"📈 Berechne mIoU pro Query...")
+    
+    # Sammle IoU-Werte pro Query: (layer_idx, query_idx) -> List[float]
+    query_ious: Dict[Tuple[int, int], List[float]] = {}
+    
+    for item in iter_decoder_iou_inputs():
+        key = (item.layer_idx, item.query_idx)
+        
+        # Hole vorberechneten Threshold
+        threshold = query_thresholds.get(key)
+        if threshold is None:
+            continue
+        
+        # Berechne Response-Map
+        response_map = _compute_query_response_map(
+            item.query_features,
+            item.pixel_embedding
+        )
+        
+        # Skaliere auf Input-Größe
+        heatmap_scaled = _scale_to_input_size(response_map, item.input_size)
+        
+        # Binarisiere mit per-Query Threshold
+        binary_map = apply_per_query_binarization(heatmap_scaled, threshold)
+        
+        # Berechne IoU
+        iou = _compute_iou(binary_map, item.mask_input)
+        
+        # Sammle IoU-Wert
+        if key not in query_ious:
+            query_ious[key] = []
+        query_ious[key].append(iou)
+    
+    # Berechne mIoU pro Query und gruppiere nach Layer
+    per_layer_results: Dict[int, List[Dict[str, object]]] = {}
+    
+    for (layer_idx, query_idx), ious in query_ious.items():
+        if len(ious) > 0:
+            mean_iou = float(np.mean(ious))
+        else:
+            mean_iou = 0.0
+        
+        result = {
+            "query_idx": query_idx,
+            "mean_iou": mean_iou,
+            "num_images": len(ious),
+        }
+        
+        if layer_idx not in per_layer_results:
+            per_layer_results[layer_idx] = []
+        per_layer_results[layer_idx].append(result)
+    
+    # Sortiere pro Layer nach mIoU (absteigend)
+    for layer_idx in per_layer_results:
+        per_layer_results[layer_idx].sort(key=lambda x: x["mean_iou"], reverse=True)
+    
+    print(f"✅ mIoU berechnet für {len(query_ious)} Queries")
+    return per_layer_results
+
+
+def export_mean_iou_csv(
+    mean_iou_results: Dict[int, List[Dict[str, object]]],
+    percentile: float = 90.0
+) -> None:
+    """Exportiert mIoU-Ergebnisse als CSV pro Layer (wird von main_network_dissection_per_query genutzt)."""
+    export_root = _export_root()
+    print(f"📊 Exportiere mIoU-Ergebnisse...")
+    for layer_idx, results in mean_iou_results.items():
+        layer_dir = os.path.join(export_root, f"layer{layer_idx}")
+        _ensure_dir(layer_dir)
+        csv_path = os.path.join(layer_dir, "mIoU_per_Query.csv")
+        fieldnames = ["query_idx", "mean_iou", "num_images"]
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(results)
+        print(f"  ✅ Layer {layer_idx}: {len(results)} Queries -> {csv_path}")
+    print(f"✅ mIoU Export abgeschlossen")
+
+
+def create_best_query_visualizations(
+    mean_iou_results: Dict[int, List[Dict[str, object]]],
+    query_thresholds: Dict[Tuple[int, int], float]
+) -> None:
+    """
+    Erstellt für jede Layer eine Visualisierung der besten Query.
+    
+    Farbcodierung:
+    - Rot (BGR=0,0,255): Ground Truth Maske (nur Maske)
+    - Blau (BGR=255,0,0): Überschneidung (Maske ∧ Binär-Heatmap)
+    - Gelb (BGR=0,255,255): Binär-Heatmap nur (ohne Maske)
+    - Schwarz: Rest
+    
+    Args:
+        mean_iou_results: Dict[layer_idx] -> List[{"query_idx", "mean_iou", ...}]
+        query_thresholds: Dict[(layer_idx, query_idx)] -> threshold_value
+    """
+    if cv2 is None:
+        print("⚠️  OpenCV nicht verfügbar. Überspringe Visualisierungen.")
+        return
+    
+    # Lazy-Imports
+    try:
+        from .iou_core_decoder import _compute_query_response_map, apply_per_query_binarization, _scale_to_input_size  # type: ignore
+    except Exception:
+        import os as _os, sys as _sys
+        _sys.path.append(_os.path.dirname(__file__))
+        from iou_core_decoder import _compute_query_response_map, apply_per_query_binarization, _scale_to_input_size  # type: ignore
+    
+    print(f"🎨 Erstelle Visualisierungen für beste Queries pro Layer...")
+    
+    export_root = _export_root()
+    
+    # Für jede Layer die beste Query finden
+    for layer_idx, results in mean_iou_results.items():
+        if not results:
+            continue
+        
+        # Beste Query (bereits nach mIoU sortiert, erste ist beste)
+        best_query = results[0]
+        best_query_idx = int(best_query["query_idx"])
+        best_miou = float(best_query["mean_iou"])
+        
+        print(f"\n  Layer {layer_idx}: Beste Query = {best_query_idx} (mIoU = {best_miou:.4f})")
+        
+        # Hole Threshold für diese Query
+        key = (layer_idx, best_query_idx)
+        threshold = query_thresholds.get(key)
+        if threshold is None:
+            print(f"    ⚠️  Kein Threshold gefunden. Überspringe.")
+            continue
+        
+        # Erzeuge Visualisierungen für ALLE Bilder dieser besten Query
+        saved_count = 0
+        for item in iter_decoder_iou_inputs():
+            if item.layer_idx == layer_idx and item.query_idx == best_query_idx:
+                # Berechne Response-Map
+                response_map = _compute_query_response_map(
+                    item.query_features,
+                    item.pixel_embedding
+                )
+                
+                # Skaliere auf Input-Größe
+                heatmap_scaled = _scale_to_input_size(response_map, item.input_size)
+                
+                # Binarisiere
+                binary_map = apply_per_query_binarization(heatmap_scaled, threshold)
+                
+                # Erstelle Visualisierung
+                mask = item.mask_input.astype(bool)
+                bin_hm = binary_map.astype(bool)
+                
+                # Berechne Bereiche
+                inter = np.logical_and(mask, bin_hm)  # Überschneidung
+                mask_only = np.logical_and(mask, np.logical_not(bin_hm))  # Nur Maske
+                hm_only = np.logical_and(bin_hm, np.logical_not(mask))  # Nur Heatmap
+                
+                # Erstelle BGR-Bild
+                H, W = mask.shape
+                img = np.zeros((H, W, 3), dtype=np.uint8)
+                
+                # Blau für Überschneidung
+                img[inter, 0] = 255  # B
+                # Rot für Maske-only
+                img[mask_only, 2] = 255  # R
+                # Gelb für Heatmap-only (R+G)
+                img[hm_only, 1] = 255  # G
+                img[hm_only, 2] = 255  # R
+                
+                # Speichere Visualisierung
+                layer_dir = os.path.join(export_root, f"layer{layer_idx}")
+                _ensure_dir(layer_dir)
+                vis_dir = os.path.join(layer_dir, "visualizations")
+                _ensure_dir(vis_dir)
+                
+                vis_filename = f"best_query_{best_query_idx}_{item.image_id}.png"
+                vis_path = os.path.join(vis_dir, vis_filename)
+                
+                cv2.imwrite(vis_path, img)
+                saved_count += 1
+                if saved_count % 25 == 0:
+                    print(f"    … {saved_count} Visualisierungen gespeichert …")
+
+        if saved_count == 0:
+            print(f"    ⚠️  Keine Daten für Visualisierung gefunden.")
+        else:
+            print(f"    ✅ {saved_count} Visualisierungen gespeichert.")
+    
+    print(f"\n✅ Visualisierungen abgeschlossen")
 
 
 # -----------------------------
@@ -359,204 +677,91 @@ def _export_root() -> str:
     return os.path.join(_decoder_out_dir(), "iou_results")
 
 
-def _write_csv(path: str, rows: List[Dict[str, object]]) -> None:
-    if not rows:
+# Hilfsfunktion _write_csv wird nicht mehr benötigt (zugehörige Exportfunktion entfernt)
+
+
+# main_export_decoder_iou wurde entfernt (wird nicht über main aufgerufen)
+
+
+# main_print_all wurde entfernt (wird nicht über main aufgerufen)
+
+
+def main_network_dissection_per_query(percentile: float = 99.5) -> None:
+    """
+    Hauptfunktion für Network Dissection mit per-Query Thresholding.
+    
+    Args:
+        percentile: Perzentil-Wert für Query-Threshold (Default: 99.5)
+    
+    Workflow:
+    1. Berechne per-Query Thresholds über alle Bilder
+    2. Berechne mIoU pro Query über alle Bilder
+    3. Exportiere mIoU_per_Query.csv (sortiert nach mIoU)
+    4. Erstelle Visualisierungen der besten Queries pro Layer
+    
+    Ausgabe:
+    - myThesis/output/decoder/iou_results/layer<X>/mIoU_per_Query.csv
+    - myThesis/output/decoder/iou_results/layer<X>/visualizations/best_query_*.png
+    """
+    print("=" * 80)
+    print(f"🚀 Network Dissection mit per-Query Thresholding (Perzentil: {percentile})")
+    print("=" * 80)
+    
+    # Schritt 1: Berechne per-Query Thresholds
+    print("\n📌 Schritt 1/4: Threshold-Berechnung")
+    query_thresholds = compute_per_query_thresholds(percentile=percentile)
+    
+    if not query_thresholds:
+        print("❌ Keine Thresholds berechnet. Abbruch.")
         return
     
-    fieldnames = [
-        "layer_idx",
-        "image_idx", 
-        "query_idx",
-        "iou",
-        "threshold",
-        "positives",
-        "heatmap_path",
-        "overlay_path",
-    ]
+    # Schritt 2: Berechne mIoU pro Query
+    print("\n📌 Schritt 2/4: mIoU-Berechnung")
+    mean_iou_results = compute_mean_iou_per_query(query_thresholds)
     
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def main_export_decoder_iou() -> None:
-    """
-    Berechnet IoUs für alle Decoder-Queries und exportiert Ergebnisse.
+    # Schritt 3: Exportiere mIoU_per_Query.csv (sortiert nach mIoU)
+    print("\n📌 Schritt 3/4: mIoU-Export")
+    export_mean_iou_csv(mean_iou_results, percentile=percentile)
     
-    Ausgabe-Struktur:
-    - myThesis/output/decoder/iou_results/layer<L>/iou_sorted.csv
-    - myThesis/output/decoder/iou_results/layer<L>/heatmaps/Bild<I>_Query<Q>.png
-    - myThesis/output/decoder/iou_results/layer<L>/comparisons/best_Bild<I>_Query<Q>.png
-    """
-    # Lazy-Import von iou_core_decoder
-    try:
-        from .iou_core_decoder import compute_iou_decoder, save_heatmap_png, save_overlay_comparison  # type: ignore
-    except Exception:
-        import os as _os, sys as _sys
-        _sys.path.append(_os.path.dirname(__file__))
-        from iou_core_decoder import compute_iou_decoder, save_heatmap_png, save_overlay_comparison  # type: ignore
+    # Schritt 4: Erstelle Visualisierungen
+    print("\n📌 Schritt 4/4: Visualisierungen erstellen")
+    create_best_query_visualizations(mean_iou_results, query_thresholds)
+    
+    # Zusammenfassung
+    print("\n" + "=" * 80)
+    print("✅ Network Dissection abgeschlossen!")
+    print("=" * 80)
+    
+    # Statistiken ausgeben
+    total_queries = len(query_thresholds)
+    total_layers = len(mean_iou_results)
+    
+    print(f"\n📊 Statistiken:")
+    print(f"  • Verarbeitete Queries: {total_queries}")
+    print(f"  • Verarbeitete Layer: {total_layers}")
+    print(f"  • Perzentil: {percentile}")
+    
+    # Beste Queries pro Layer
+    print(f"\n🏆 Top-Queries pro Layer (nach mIoU):")
+    for layer_idx in sorted(mean_iou_results.keys()):
+        results = mean_iou_results[layer_idx]
+        if results:
+            # Sortiere nach mIoU absteigend
+            top_queries = sorted(results, key=lambda x: x["mean_iou"], reverse=True)[:3]
+            print(f"\n  Layer {layer_idx}:")
+            for i, q in enumerate(top_queries, 1):
+                print(f"    {i}. Query {q['query_idx']}: mIoU = {q['mean_iou']:.4f} ({q['num_images']} Bilder)")
     
     export_root = _export_root()
-    _ensure_dir(export_root)
-    
-    # Sammle Ergebnisse pro Layer
-    per_layer: Dict[int, List[Dict[str, object]]] = {}
-    # Tracking der besten Einträge pro Layer
-    per_layer_best: Dict[int, Dict[str, object]] = {}
-    
-    count = 0
-    for item in iter_decoder_iou_inputs():
-        res = compute_iou_decoder(
-            item,
-            threshold_method="percentile",
-            threshold_value=80.0,
-            threshold_absolute=None,
-            return_heatmap=True,
-        )
-        
-        layer_dir = os.path.join(export_root, f"layer{res.layer_idx}")
-        heat_dir = os.path.join(layer_dir, "heatmaps")
-        _ensure_dir(heat_dir)
-        heat_name = f"Bild{res.image_idx}_Query{res.query_idx}.png"
-        heat_path = os.path.join(heat_dir, heat_name)
-        
-        if res.heatmap is not None:
-            save_heatmap_png(heat_path, res.heatmap)
-        else:
-            heat_path = ""
-        
-        row = {
-            "layer_idx": res.layer_idx,
-            "image_idx": res.image_idx,
-            "query_idx": res.query_idx,
-            "iou": float(res.iou),
-            "threshold": float(res.threshold),
-            "positives": int(res.positives),
-            "heatmap_path": os.path.relpath(heat_path, start=export_root) if heat_path else "",
-            "overlay_path": "",
-        }
-        per_layer.setdefault(res.layer_idx, []).append(row)
-        
-        # Bestleistung pro Layer aktualisieren
-        best = per_layer_best.get(res.layer_idx)
-        if best is None:
-            per_layer_best[res.layer_idx] = {
-                "best_iou": float(res.iou),
-                "items": [
-                    {
-                        "image_idx": res.image_idx,
-                        "query_idx": res.query_idx,
-                        "threshold": float(res.threshold),
-                        "heatmap": res.heatmap,
-                        "mask_input": item.mask_input,
-                    }
-                ],
-            }
-        else:
-            cur_best = float(best["best_iou"])  # type: ignore
-            if float(res.iou) > cur_best + 1e-12:
-                best["best_iou"] = float(res.iou)
-                best["items"] = [
-                    {
-                        "image_idx": res.image_idx,
-                        "query_idx": res.query_idx,
-                        "threshold": float(res.threshold),
-                        "heatmap": res.heatmap,
-                        "mask_input": item.mask_input,
-                    }
-                ]
-            elif abs(float(res.iou) - cur_best) <= 1e-12:
-                best.setdefault("items", []).append(
-                    {
-                        "image_idx": res.image_idx,
-                        "query_idx": res.query_idx,
-                        "threshold": float(res.threshold),
-                        "heatmap": res.heatmap,
-                        "mask_input": item.mask_input,
-                    }
-                )
-        
-        count += 1
-    
-    # Erzeuge Overlays der besten Queries und schreibe pro Layer CSV
-    for lidx, rows in per_layer.items():
-        # Overlays für beste Einträge
-        best = per_layer_best.get(lidx)
-        overlay_map: Dict[Tuple[int, int], str] = {}
-        if best is not None:
-            items = best.get("items", [])  # type: ignore
-            layer_dir = os.path.join(export_root, f"layer{lidx}")
-            cmp_dir = os.path.join(layer_dir, "comparisons")
-            _ensure_dir(cmp_dir)
-            for it in items:  # type: ignore
-                img_idx = int(it["image_idx"])  # type: ignore
-                query_idx = int(it["query_idx"])  # type: ignore
-                thr = float(it["threshold"])  # type: ignore
-                hm = it["heatmap"]  # type: ignore
-                msk = it["mask_input"]  # type: ignore
-                if hm is None:
-                    continue
-                cmp_name = f"best_Bild{img_idx}_Query{query_idx}.png"
-                cmp_path = os.path.join(cmp_dir, cmp_name)
-                save_overlay_comparison(cmp_path, msk, hm, thr)
-                overlay_map[(img_idx, query_idx)] = os.path.relpath(cmp_path, start=export_root)
-        
-        rows_sorted = sorted(rows, key=lambda r: r.get("iou", 0.0), reverse=True)
-        # Füge overlay_path für Best-Items ein
-        for r in rows_sorted:
-            key = (int(r["image_idx"]), int(r["query_idx"]))
-            if key in overlay_map:
-                r["overlay_path"] = overlay_map[key]
-        
-        layer_dir = os.path.join(export_root, f"layer{lidx}")
-        _ensure_dir(layer_dir)
-        csv_path = os.path.join(layer_dir, "iou_sorted.csv")
-        _write_csv(csv_path, rows_sorted)
-    
-    if count == 0:
-        print("Keine Daten gefunden. Bitte zuvor die Decoder-Extraktion ausführen.")
-    else:
-        print(f"Decoder IoU Export abgeschlossen. Root: {export_root}")
-        print(f"Verarbeitet: {count} Query-Embeddings")
-
-
-def main_print_all() -> None:
-    """
-    Berechnet und druckt alle IoUs für Decoder-Queries.
-    
-    Ausgabe in der Form:
-    Layer=<L> Bild=<B> Query=<Q> IoU=<IOU> thr=<T> pos=<N>
-    """
-    # Import hier durchführen
-    try:
-        from .iou_core_decoder import compute_iou_decoder  # type: ignore
-    except Exception:
-        import os as _os, sys as _sys
-        _sys.path.append(_os.path.dirname(__file__))
-        from iou_core_decoder import compute_iou_decoder  # type: ignore
-    
-    count = 0
-    for item in iter_decoder_iou_inputs():
-        result = compute_iou_decoder(
-            item,
-            threshold_method="percentile",
-            threshold_value=80.0,
-            threshold_absolute=None,
-        )
-        print(
-            f"Layer={result.layer_idx} Bild={result.image_idx} Query={result.query_idx} "
-            f"IoU={result.iou:.6f} thr={result.threshold:.4f} pos={result.positives}"
-        )
-        count += 1
-    
-    if count == 0:
-        print("Keine Daten gefunden. Bitte zuvor die Decoder-Extraktion ausführen.")
+    print(f"\n📁 Ausgabe-Verzeichnis: {export_root}")
+    print("=" * 80)
 
 
 if __name__ == "__main__":
-    # Exportiere IoU-Ergebnisse für Decoder-Queries
-    main_export_decoder_iou()
+    # Network Dissection mit per-Query Thresholding
+    # Konfigurierbar: Perzentil (Default: 99.5)
+    PERCENTILE = 90.0  # Konfigurierbare Variable
+    main_network_dissection_per_query(percentile=PERCENTILE)
 
 
 # -----------------------------
