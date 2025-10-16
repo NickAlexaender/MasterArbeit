@@ -4,6 +4,11 @@ pillow>=11.3.0
 numpy>=2.2.6
 
 
+# Für LRP-Analyse und Excel-Export
+pandas>=2.2.0
+openpyxl>=3.1.2
+
+
 # Currently given requirements (from maskdino-arm conda environment):
 absl-py==2.3.1
 antlr4-python3-runtime==4.9.3

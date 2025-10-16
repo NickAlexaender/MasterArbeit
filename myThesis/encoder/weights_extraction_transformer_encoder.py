@@ -188,14 +188,124 @@ def accept_weights_model_images(weights_path: str, model: torch.nn.Module, image
     if shapes_handle is not None:
         handles.append(shapes_handle)
 
-    # 2) Gewichtsextraktion: Für jedes Bild Forward ausführen und Layer-Ausgaben einsammeln
-    results: Dict[str, Dict[str, np.ndarray]] = {}
+    # 2) Vorbereitung: Ausgabeordner und CSV-Bereinigung (Duplikate vermeiden)
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    # Globaler Ordner für Layer-CSV-Dateien (eine CSV je Layer)
+    base_out_layers = os.path.join(project_root, "output", "encoder")
+    os.makedirs(base_out_layers, exist_ok=True)
+
+    def _clear_existing_csvs(base_dir: str) -> None:
+        removed = 0
+        for root, _dirs, files in os.walk(base_dir):
+            for fn in files:
+                if fn.lower() == "feature.csv":
+                    try:
+                        os.remove(os.path.join(root, fn))
+                        removed += 1
+                    except Exception:
+                        pass
+        if removed:
+            print(f"🧹 Alte CSVs entfernt: {removed} Datei(en)")
+
+    # Einmalig vor dem ersten Export: vorhandene CSVs entfernen
+    _clear_existing_csvs(base_out_layers)
+
+    # 3) Gewichtsextraktion: Für jedes Bild Forward ausführen und Layer-Ausgaben direkt streamend exportieren
     device = _infer_device(model)
     model_was_training = model.training
     model.eval()
 
     # Bestmögliche Erkennung des erwarteten Farbformats
     input_format = getattr(model, "input_format", "RGB")
+
+    # Helper: standardisiere Layer-Output zu [B, D, N]
+    def to_bdn(arr: np.ndarray) -> Tuple[int, int, int, np.ndarray]:
+        # Rückgabe: (B, D, N, out)
+        x = arr
+        if x.ndim == 4:
+            # bevorzugt [B,C,H,W]
+            B, C, H, W = x.shape
+            # Falls letzte dim 256 ist und C nicht, transponiere
+            if C != 256 and x.shape[-1] == 256:
+                # [B, H, W, C]
+                x = np.transpose(x, (0, 3, 1, 2))
+                B, C, H, W = x.shape
+            D = C
+            N = H * W
+            out = x.reshape(B, D, N)
+            return B, D, N, out
+        elif x.ndim == 3:
+            s = list(x.shape)
+            # Versuche Achse mit 256 als Feature-Dim (D)
+            if 256 in s:
+                d_axis = s.index(256)
+            else:
+                # Fallback: nimm letzte Achse als D
+                d_axis = 2
+            # Häufige Fälle: [B,N,D], [N,B,D], [B,D,N]
+            axes = [0, 1, 2]
+            axes.remove(d_axis)
+            # Wähle B-Achse als die mit kleinstem Wert (typisch 1), N-Achse ist die andere
+            b_axis = axes[0] if x.shape[axes[0]] <= x.shape[axes[1]] else axes[1]
+            n_axis = axes[1] if b_axis == axes[0] else axes[0]
+            # Transponiere zu [B, N, D]
+            x_bnd = np.transpose(x, (b_axis, n_axis, d_axis))
+            B, N, D = x_bnd.shape
+            # Zu [B, D, N]
+            out = np.transpose(x_bnd, (0, 2, 1))
+            return B, D, N, out
+        elif x.ndim == 2:
+            # [N, D] oder [D, N]
+            if x.shape[1] == 256:
+                N, D = x.shape
+                out = x.T[None, ...]  # [1, D, N]
+                return 1, D, N, out
+            else:
+                D, N = x.shape
+                out = x[None, ...]  # [1, D, N]
+                return 1, D, N, out
+        else:
+            # Unbekannt – auf 1D flatten als N, D=1
+            flat = x.reshape(1, -1)
+            N = flat.shape[1]
+            out = flat[None, ...]  # [1, 1, N]
+            return 1, 1, N, out
+
+    # CSV-Header-Handling: Header sicherstellen und Spaltenbreite ermitteln
+    def _ensure_header(csv_path: str, N: int) -> int:
+        """Legt Header an, wenn nicht vorhanden; gibt (bestehende) Token-Spaltenanzahl zurück."""
+        if not os.path.exists(csv_path):
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                header = ["Name"] + [f"Gewicht {i+1}" for i in range(N)]
+                writer.writerow(header)
+            return N
+        # existierender Header -> N_header auslesen
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+        if header is None:
+            # defekter Header -> neu schreiben
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                header = ["Name"] + [f"Gewicht {i+1}" for i in range(N)]
+                writer.writerow(header)
+            return N
+        # Spaltenzahl - 1 (für "Name")
+        return max(0, len(header) - 1)
+
+    # CSV-Zeilen anhängen mit Spaltenanpassung auf Headerbreite
+    def _append_rows(csv_path: str, names_and_values: List[Tuple[str, List[float]]], N_header: int) -> None:
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            for name, vals in names_and_values:
+                if len(vals) < N_header:
+                    vals = vals + [""] * (N_header - len(vals))
+                elif len(vals) > N_header:
+                    vals = vals[:N_header]
+                writer.writerow([name] + vals)
+
+    layer_index_regex = re.compile(r"\.encoder\.layers\.(\d+)")
 
     try:
         with torch.no_grad():
@@ -240,10 +350,10 @@ def accept_weights_model_images(weights_path: str, model: torch.nn.Module, image
                         # N_tokens
                         n_tokens = int(sum(int(h) * int(w) for (h, w) in spatial_shapes))
                         image_id = os.path.splitext(os.path.basename(img_path))[0]
-                        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-                        base_out = os.path.join(project_root, "output", "encoder", image_id)
-                        os.makedirs(base_out, exist_ok=True)
-                        json_path = os.path.join(base_out, "shapes.json")
+                        # Per-Bild-Ordner nur für shapes.json
+                        base_out_image = os.path.join(project_root, "output", "encoder", image_id)
+                        os.makedirs(base_out_image, exist_ok=True)
+                        json_path = os.path.join(base_out_image, "shapes.json")
                         payload = {
                             "image_id": image_id,
                             "image_path": img_path,
@@ -258,19 +368,53 @@ def accept_weights_model_images(weights_path: str, model: torch.nn.Module, image
                         print(f"💾 Shapes-JSON gespeichert: {json_path}")
                 except Exception as e:
                     print(f"⚠️ Shapes-JSON konnte nicht geschrieben werden: {e}")
+                # 2c) STREAMING-CSV: Pro Layer sofort exportieren (kein globales Sammeln)
+                image_id = os.path.splitext(os.path.basename(img_path))[0]
 
-                # Ergebnisse aus den Puffern kopieren (-> numpy)
-                per_layer: Dict[str, np.ndarray] = {}
                 for layer_name, tensor in feature_buffers.items():
                     try:
                         arr = tensor.numpy()
                     except Exception:
                         arr = np.asarray(tensor.cpu())
-                    # Speicherplatzsparend als float16 ablegen
-                    per_layer[layer_name] = arr.astype(np.float16, copy=False)
+                    # Speicher sparen
+                    arr = arr.astype(np.float16, copy=False)
 
-                results[img_path] = per_layer
-                print(f"✅ Features extrahiert: {img_path} | Layer: {len(per_layer)}")
+                    m = layer_index_regex.search(layer_name)
+                    if not m:
+                        continue
+                    lidx = int(m.group(1))
+
+                    # Standardisieren -> [B, D, N]
+                    B, D, N, out = to_bdn(arr)
+                    if D != 256:
+                        print(f"⚠️ Layer {lidx}: Feature-Dim={D}≠256 – exportiere dennoch.")
+                    if B != 1:
+                        print(f"ℹ️ Layer {lidx}: Batchgröße {B} – exportiere nur b=0.")
+
+                    layer_dir = os.path.join(base_out_layers, f"layer{lidx}")
+                    os.makedirs(layer_dir, exist_ok=True)
+                    # Gemeinsame CSV pro Layer (alle Bilder haben gleiche Größe/Token-Länge)
+                    csv_path = os.path.join(layer_dir, "feature.csv")
+
+                    N_header = _ensure_header(csv_path, N)
+
+                    rows: List[Tuple[str, List[float]]] = []
+                    for fidx in range(D):
+                        name = f"{image_id}, Feature{fidx+1}"
+                        values = out[0, fidx, :].astype(np.float32).tolist()
+                        rows.append((name, values))
+
+                    _append_rows(csv_path, rows, N_header)
+
+                    # Speicher freigeben
+                    del arr, out, rows
+
+                # Puffer direkt leeren und GC aufrufen
+                feature_buffers.clear()
+                import gc as _gc
+                _gc.collect()
+
+                print(f"✅ Features extrahiert: {img_path} | Layer: {len(handles)-1}")
 
     finally:
         # Hooks wieder entfernen und Modellmodus wiederherstellen
@@ -282,132 +426,5 @@ def accept_weights_model_images(weights_path: str, model: torch.nn.Module, image
         if model_was_training:
             model.train()
 
-   # 3) Räumliche Rekonstruierbarkeit abspeichern
-
-
-
-    # 4) CSV-Export: Für jeden Layer eine Datei output/encoder/layerX/feature.csv
-    print("📝 Starte CSV-Export pro Layer …")
-
-    # Helper: standardisiere Layer-Output zu [B, D, N]
-    def to_bdn(arr: np.ndarray) -> Tuple[int, int, int, np.ndarray]:
-        # Rückgabe: (B, D, N, out)
-        x = arr
-        if x.ndim == 4:
-            # bevorzugt [B,C,H,W]
-            B, C, H, W = x.shape
-            # Falls letzte dim 256 ist und C nicht, transponiere
-            if C != 256 and x.shape[-1] == 256:
-                # [B, H, W, C]
-                x = np.transpose(x, (0, 3, 1, 2))
-                B, C, H, W = x.shape
-            D = C
-            N = H * W
-            out = x.reshape(B, D, N)
-            return B, D, N, out
-        elif x.ndim == 3:
-            s = list(x.shape)
-            # Versuche Achse mit 256 als Feature-Dim (D)
-            if 256 in s:
-                d_axis = s.index(256)
-            else:
-                # Fallback: nimm letzte Achse als D
-                d_axis = 2
-            # Identifiziere B-Achse als die, die (vermutlich) 1 ist oder klein
-            # Häufige Fälle: [B,N,D], [N,B,D], [B,D,N]
-            axes = [0, 1, 2]
-            axes.remove(d_axis)
-            # Wähle B-Achse als die mit kleinstem Wert (typisch 1), N-Achse ist die andere
-            b_axis = axes[0] if x.shape[axes[0]] <= x.shape[axes[1]] else axes[1]
-            n_axis = axes[1] if b_axis == axes[0] else axes[0]
-            # Transponiere zu [B, N, D]
-            x_bnd = np.transpose(x, (b_axis, n_axis, d_axis))
-            B, N, D = x_bnd.shape
-            # Zu [B, D, N]
-            out = np.transpose(x_bnd, (0, 2, 1))
-            return B, D, N, out
-        elif x.ndim == 2:
-            # [N, D] oder [D, N]
-            if x.shape[1] == 256:
-                N, D = x.shape
-                out = x.T[None, ...]  # [1, D, N]
-                return 1, D, N, out
-            else:
-                D, N = x.shape
-                out = x[None, ...]  # [1, D, N]
-                return 1, D, N, out
-        else:
-            # Unbekannt – auf 1D flatten als N, D=1
-            flat = x.reshape(1, -1)
-            N = flat.shape[1]
-            out = flat[None, ...]  # [1, 1, N]
-            return 1, 1, N, out
-
-    # Aggregiere pro Layer über alle Bilder
-    per_layer_rows: Dict[int, List[List[Any]]] = {}
-    per_layer_header: Dict[int, List[str]] = {}
-
-    # Layer aus allen Ergebnissen einsammeln (stabile Sortierung über Index)
-    # Mapping von layer_idx -> list of (image_id, arr)
-    # WICHTIG: Verwende image_id (z.B. "image 1") statt numerischer Index für korrekte Zuordnung
-    layer_to_items: Dict[int, List[Tuple[str, np.ndarray]]] = {}
-    layer_index_regex = re.compile(r"\.encoder\.layers\.(\d+)")
-
-    for img_path in image_list:
-        # Extrahiere image_id aus Dateinamen (identisch zu Zeile 243 oben)
-        image_id = os.path.splitext(os.path.basename(img_path))[0]
-        layer_outputs = results.get(img_path, {})
-        for layer_name, arr in layer_outputs.items():
-            m = layer_index_regex.search(layer_name)
-            if not m:
-                continue
-            lidx = int(m.group(1))
-            layer_to_items.setdefault(lidx, []).append((image_id, arr))
-
-    for lidx in sorted(layer_to_items.keys()):
-        rows: List[List[Any]] = []
-        header: List[str] = ["Name"]
-        items = layer_to_items[lidx]
-
-        # Bestimme N (Token-Anzahl) anhand des ersten Elements
-        if items:
-            _, first_arr = items[0]
-            B, D, N, _ = to_bdn(first_arr)
-            header += [f"Gewicht {i+1}" for i in range(N)]
-        else:
-            header += ["Gewicht 1"]
-
-        for image_id, arr in items:
-            B, D, N, out = to_bdn(arr)
-            if D != 256:
-                print(f"⚠️ Layer {lidx}: Feature-Dim={D}≠256 – exportiere dennoch.")
-            # Sicherheitscheck B
-            if B != 1:
-                # häufig B==1; bei >1 exportiere nur erstes Element und warnen
-                print(f"ℹ️ Layer {lidx}: Batchgröße {B} – exportiere nur b=0.")
-            for fidx in range(D):
-                # Verwende image_id (z.B. "image 1") statt generischen Index
-                name = f"{image_id}, Feature{fidx+1}"
-                values = out[0, fidx, :].tolist()
-                rows.append([name] + values)
-
-        per_layer_rows[lidx] = rows
-        per_layer_header[lidx] = header
-
-    # Schreiben auf Disk
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    base_out = os.path.join(project_root, "output", "encoder")
-    os.makedirs(base_out, exist_ok=True)
-
-    for lidx in sorted(per_layer_rows.keys()):
-        layer_dir = os.path.join(base_out, f"layer{lidx}")
-        os.makedirs(layer_dir, exist_ok=True)
-        csv_path = os.path.join(layer_dir, "feature.csv")
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(per_layer_header[lidx])
-            writer.writerows(per_layer_rows[lidx])
-        print(f"💾 CSV gespeichert: {csv_path} | Zeilen: {len(per_layer_rows[lidx])}")
-
-    print(f"📊 Extraktion abgeschlossen. Bilder: {len(results)} | Layer-Dateien: {len(per_layer_rows)}")
-    return results
+    print("📊 Extraktion abgeschlossen (streaming).")
+    return {}

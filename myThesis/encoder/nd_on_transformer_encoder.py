@@ -36,8 +36,43 @@ try:
 except Exception as e:
     print(f"⚠️ NumPy fix failed, but continuing: {e}")
 
-# --- Standard-Imports ---
+# --- Sicheres TMP-Verzeichnis setzen (fix für tempfile/portalocker) ---
 import os
+import tempfile
+
+def _ensure_tmpdir():
+    """Stellt sicher, dass ein nutzbares TMP-Verzeichnis existiert, bevor
+    Bibliotheken wie portalocker/iopath/detectron2 importiert werden.
+    """
+    try:
+        d = tempfile.gettempdir()
+        # Schreibtest
+        test_path = os.path.join(d, "__tmp_write_test__")
+        with open(test_path, "w") as f:
+            f.write("ok")
+        os.remove(test_path)
+        return  # alles gut
+    except Exception:
+        pass
+
+    # Fallback: lokales .tmp im Projekt anlegen und als TMPDIR setzen
+    try:
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    except Exception:
+        project_root = os.getcwd()
+    fallback = os.path.abspath(os.path.join(project_root, ".tmp"))
+    try:
+        os.makedirs(fallback, exist_ok=True)
+        for env in ("TMPDIR", "TMP", "TEMP"):
+            os.environ[env] = fallback
+        tempfile.tempdir = fallback
+        print(f"⚙️ TMPDIR Fallback aktiviert: {fallback}")
+    except Exception as e:
+        print(f"⚠️ Konnte Fallback-TMP nicht setzen: {e}")
+
+_ensure_tmpdir()
+
+# --- Standard-Imports ---
 import sys
 from typing import List
 import torch

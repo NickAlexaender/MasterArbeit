@@ -15,3 +15,25 @@ pip install 'git+https://github.com/facebookresearch/detectron2.git@v0.6'
 
 cd MaskDINO
 pip install -r requirements.txt
+
+
+
+# Run it all:
+
+python myThesis/conceptualize_image.py
+
+- 
+
+python myThesis/encoder/nd_on_transformer_encoder.py
+
+python myThesis/encoder/calculate_IoU_for_encoder.py
+
+-
+
+python myThesis/decoder/nd_on_transformer_decoder.py
+
+python myThesis/decoder/calculate_IoU_for_decoder.py
+
+- 
+
+python myThesis/lrp/get_neurons_to_look_at.py
