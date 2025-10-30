@@ -90,14 +90,14 @@ Alle Overlays verwenden folgende Farbcodierung:
 | Farbe | BGR-Wert    | Bedeutung                                    |
 |-------|-------------|----------------------------------------------|
 | 🔵 Blau  | (255,0,0)   | Überschneidung (True Positive)              |
-| 🔴 Rot   | (0,0,255)   | Nur Maske (False Negative)                  |
-| 🟡 Gelb  | (0,255,255) | Nur Heatmap (False Positive)                |
+| 🔴 Rot   | (0,0,255)   | Nur Ground Truth (False Negative)           |
+| � Grün  | (0,255,0)   | Nur Prediction/Heatmap (False Positive)     |
 | ⚫ Schwarz | (0,0,0)     | Rest (True Negative)                        |
 
 **Interpretation:**
 - Viel Blau: Feature erkennt Konzept gut
 - Viel Rot: Feature übersieht Teile des Konzepts
-- Viel Gelb: Feature feuert außerhalb des Konzepts
+- Viel Grün: Feature feuert außerhalb des Konzepts
 
 ## Workflow
 

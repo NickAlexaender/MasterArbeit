@@ -37,3 +37,5 @@ python myThesis/decoder/calculate_IoU_for_decoder.py
 - 
 
 python myThesis/lrp/get_neurons_to_look_at.py
+
+python myThesis/output/lrp_result.csv

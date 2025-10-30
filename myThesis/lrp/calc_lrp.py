@@ -3,16 +3,21 @@ LRP/Attributions-Analyse für MaskDINO-Transformer Encoder
 
 Funktion:
 - Lädt das MaskDINO-Modell (wie in myThesis/fine-tune.py konfiguriert)
-- Führt eine Attribution (LRP) für ein wählbares Encoder-Layer
-  und ein bestimmtes Feature (Kanalindex) durch
+- Führt eine Attribution (LRP) für ein wählbares Encoder-/Decoder-Layer
+	und ein bestimmtes Feature (Kanalindex) durch
 - Aggregiert Beiträge der vorherigen Features (Kanäle) über alle Bilder im Ordner
-- Exportiert Ergebnisse als Excel-Datei
+- Exportiert Ergebnisse als CSV-Datei
 
-Beispielaufruf (macOS, zsh):
-	python myThesis/lrp/calc_lrp.py \
-	--images-dir /Users/nicklehmacher/Alles/MasterArbeit/myThesis/image \
-	--layer-index 3 \
-	--feature-index 235 \
+Nutzung:
+- Programmatisch: rufe die Funktion ``main(...)`` direkt auf und übergebe Parameter.
+- CLI (kompatibel): starte das Skript wie zuvor mit Argumenten.
+
+Beispiel (CLI, macOS, zsh):
+
+		python myThesis/lrp/calc_lrp.py \
+		--images-dir /Users/nicklehmacher/Alles/MasterArbeit/myThesis/image \
+		--layer-index 3 \
+		--feature-index 235 \
 		--output-csv /Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/lrp_layer3_feat235.csv
 """
 
@@ -335,17 +340,27 @@ class _LayerTap:
 
 
 def _to_BTC(t: Tensor) -> Tensor:
+	"""Bringe Tensor robust in Form (B, T, C).
+
+	Regeln:
+	- 4D: (B, C, H, W) -> (B, H*W, C)
+	- 3D: Identifiziere Batch-Achse als Achse mit dem kleinsten Dimensionwert,
+	  Tokens als größte Achse und die verbleibende als Kanal-Achse. Permutiere zu (B,T,C).
+	  Dies deckt typische Fälle ab: (L,B,C), (B,L,C), (B,C,L).
+	"""
 	if t.dim() == 4:  # (B, C, H, W) -> (B, H*W, C)
 		B, C, H, W = t.shape
 		return t.permute(0, 2, 3, 1).reshape(B, H * W, C)
 	if t.dim() == 3:
-		BLC = t.shape
-		if BLC[0] < 16 and BLC[1] > 16 and BLC[2] < 1024:
-			return t.permute(1, 0, 2)  # (L,B,C) -> (B,L,C)
-		if BLC[1] < 16 and BLC[2] > 16:
-			return t.permute(0, 2, 1)  # (B,C,L) -> (B,L,C)
-		return t
-	raise ValueError(f"Unerwartete Tensorform: {t.shape}")
+		dims = list(t.shape)
+		# Bestimme Batch-/Token-/Kanal-Achsen heuristisch über Größenordnung
+		b_axis = min(range(3), key=lambda i: dims[i])  # kleinste Dimension = Batch (typ. 1..8)
+		t_axis = max(range(3), key=lambda i: dims[i])  # größte Dimension = Tokens (typ. 100+)
+		c_axis = ({0, 1, 2} - {b_axis, t_axis}).pop()
+		if (b_axis, t_axis, c_axis) == (0, 1, 2):
+			return t  # bereits (B,T,C)
+		return t.permute(b_axis, t_axis, c_axis)
+	raise ValueError(f"Unerwartete Tensorform: {tuple(t.shape)}")
 
 
 def aggregate_channel_relevance(R_in: Tensor) -> Tensor:
@@ -359,42 +374,75 @@ def aggregate_channel_relevance(R_in: Tensor) -> Tensor:
 	raise ValueError(f"Unerwartete R_in-Form: {tuple(R_in.shape)}")
 
 
-def build_target_relevance(layer_output: Tensor, feature_index: int, token_reduce: str, target_norm: str = "sum1") -> Tensor:
-	"""Erzeuge eine Start-Relevanz R_out für das Zielfeature (kanalweise) ohne Gradienten.
+def build_target_relevance(
+	layer_output: Tensor,
+	feature_index: int,
+	token_reduce: str,
+	target_norm: str = "sum1",
+	index_axis: str = "channel",
+) -> Tensor:
+	"""Erzeuge eine Start-Relevanz R_out ohne Gradienten.
 
-	- Bei 3D/4D-Outputs verteilen wir Relevanz nur auf den gewählten Kanal.
-	- token_reduce steuert die Gewichtung über Tokens/Positionen:
-		* mean: gleiche Verteilung (1) über Tokens
-		* max: stärkere Tokens werden bevorzugt (proportional zu pos. Aktivierung)
+	index_axis:
+	- "channel": feature_index adressiert den Kanal (C-Achse)
+	- "token":   feature_index adressiert den Token/Query (T-Achse)
+
+	token_reduce wirkt nur bei index_axis="channel" und steuert die Verteilung über Tokens.
 	"""
 	y = _to_BTC(layer_output)  # (B, T, C)
 	B, T, C = y.shape
-	if feature_index < 0 or feature_index >= C:
-		raise IndexError(f"feature_index {feature_index} außerhalb [0, {C-1}]")
 
 	base = torch.zeros_like(y)
-	feat = y[..., feature_index]
-	if token_reduce == "mean":
-		w = torch.ones_like(feat)
-	elif token_reduce == "max":
-		w = torch.relu(feat)
+
+	if index_axis == "channel":
+		if feature_index < 0 or feature_index >= C:
+			raise IndexError(
+				f"feature_index {feature_index} außerhalb [0, {C-1}] (axis=channel)"
+			)
+		feat = y[..., feature_index]
+		if token_reduce == "mean":
+			w = torch.ones_like(feat)
+		elif token_reduce == "max":
+			w = torch.relu(feat)
+		else:
+			raise ValueError("token_reduce muss 'mean' oder 'max' sein")
+		# Normierung über alle Tokens/Batch
+		s = w.sum().clamp_min(1e-12)
+		if target_norm == "sum1":
+			w = w / s
+		elif target_norm == "sumT":
+			w = w / s * float(T)
+		elif target_norm == "none":
+			pass
+		else:
+			raise ValueError("target_norm muss 'sum1', 'sumT' oder 'none' sein")
+		base[..., feature_index] = w
+	elif index_axis == "token":
+		if feature_index < 0 or feature_index >= T:
+			raise IndexError(
+				f"feature_index {feature_index} außerhalb [0, {T-1}] (axis=token)"
+			)
+		# Verteile Gewicht gleichmäßig über Kanäle für den gewählten Token
+		w_tok = torch.ones_like(y[:, feature_index, :])  # (B, C)
+		s = w_tok.sum().clamp_min(1e-12)
+		if target_norm == "sum1":
+			w_tok = w_tok / s
+		elif target_norm == "sumT":
+			# für Token-Modus interpretieren wir 'T' als C-Anzahl
+			w_tok = w_tok / s * float(C)
+		elif target_norm == "none":
+			pass
+		else:
+			raise ValueError("target_norm muss 'sum1', 'sumT' oder 'none' sein")
+		base[:, feature_index, :] = w_tok
 	else:
-		raise ValueError("token_reduce muss 'mean' oder 'max' sein")
-	# Normiere nach gewünschter Zielnorm
-	s = w.sum().clamp_min(1e-12)
-	if target_norm == "sum1":
-		w = w / s
-	elif target_norm == "sumT":
-		w = w / s * float(T)  # frühere Skalierung
-	elif target_norm == "none":
-		pass
-	else:
-		raise ValueError("target_norm muss 'sum1', 'sumT' oder 'none' sein")
-	base[..., feature_index] = w
+		raise ValueError("index_axis muss 'channel' oder 'token' sein")
+
 	# Form zurück wie layer_output
 	if layer_output.dim() == 4:
+		if index_axis == "token":
+			raise ValueError("index_axis='token' wird für 4D-Outputs nicht unterstützt")
 		# (B,T,C)->(B,C,H,W)
-		# Wir benötigen H*W=T; rekonstruieren mit H,W aus Output
 		B2, C2, H, W = layer_output.shape
 		assert B2 == B and C2 == C and H * W == T
 		base = base.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
@@ -427,6 +475,7 @@ def run_analysis(
 	which_module: str = "encoder",
 	start_at: str = "layer",
 	method: str = "lrp",
+	index_kind: str = "auto",
 ):
 	logger = logging.getLogger("lrp")
 	logger.info("Starte LRP/Attribution-Analyse…")
@@ -487,6 +536,16 @@ def run_analysis(
 
 	chosen_name, chosen_layer = enc_layers[layer_index - 1]
 	logger.info(f"Gewähltes {layer_role}-Layer [{layer_index}]: {chosen_name} ({type(chosen_layer).__name__})")
+
+	# Index-Achse bestimmen: Decoder -> Token, Encoder -> Kanal (wenn auto)
+	if index_kind not in ("auto", "channel", "token"):
+		raise ValueError("index_kind muss 'auto', 'channel' oder 'token' sein")
+	index_axis = (
+		("token" if which_module == "decoder" else "channel")
+		if index_kind == "auto"
+		else index_kind
+	)
+	logger.info(f"Index-Achse: {index_axis} (index_kind={index_kind})")
 
 	# Bilder sammeln
 	img_files = collect_images(images_dir)
@@ -594,7 +653,7 @@ def run_analysis(
 						_ = model(batched_inputs)
 
 					# Zielrelevanz erstellen und LRP durchführen
-					R_out = build_target_relevance(y_start, feature_index, token_reduce, target_norm)
+					R_out = build_target_relevance(y_start, feature_index, token_reduce, target_norm, index_axis=index_axis)
 					rels = propagate_lrp(model, tracer, start_module, R_out, lrp_cfg)
 					R_in = rels.get(start_module)
 					if R_in is None:
@@ -636,7 +695,7 @@ def run_analysis(
 				y_layer = cache["y"]
 				x_layer = cache["x"]
 				# Zielmaskierung nur auf feature_index
-				R_out = build_target_relevance(y_layer, feature_index, token_reduce, target_norm)
+				R_out = build_target_relevance(y_layer, feature_index, token_reduce, target_norm, index_axis=index_axis)
 				# Rückwärts: d(y_feature) nach x
 				# Wir bauen einen Skalar, indem wir die Zielmaske mit y_layer multiplizieren und summieren
 				loss = (R_out * y_layer).sum()
@@ -717,7 +776,7 @@ def run_analysis(
 					_ = model(batched_inputs)
 
 				# Zielrelevanz erstellen und LRP durchführen
-				R_out = build_target_relevance(y_start, feature_index, token_reduce, target_norm)
+				R_out = build_target_relevance(y_start, feature_index, token_reduce, target_norm, index_axis=index_axis)
 				rels = propagate_lrp(model, tracer, start_module, R_out, lrp_cfg)
 				R_in = rels.get(start_module)
 				if R_in is None:
@@ -795,7 +854,8 @@ def run_analysis(
 
 
 def parse_args() -> argparse.Namespace:
-	parser = argparse.ArgumentParser(description="LRP/Attribution für MaskDINO-Encoder")
+	"""CLI-Parser für rückwärtskompatible Nutzung."""
+	parser = argparse.ArgumentParser(description="LRP/Attribution für MaskDINO-Encoder/Decoder")
 	parser.add_argument(
 		"--images-dir",
 		type=str,
@@ -805,13 +865,13 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--layer-index",
 		type=int,
-		default=1,
-		help="1-basierter Index des Encoder-Layers (z.B. 3)",
+		default=3,
+		help="1-basierter Index des Encoder-/Decoder-Layers (z.B. 3)",
 	)
 	parser.add_argument(
 		"--feature-index",
 		type=int,
-		default=90,
+		default=214,
 		help="Kanalindex (Feature) im gewählten Layer (z.B. 235)",
 	)
 	parser.add_argument(
@@ -887,7 +947,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--which-module",
 		type=str,
-		default="decoder",
+		default="encoder",
 		choices=["encoder", "decoder"],
 		help="Wähle Encoder oder Decoder für die LRP-Analyse",
 	)
@@ -908,30 +968,73 @@ def parse_args() -> argparse.Namespace:
 	return parser.parse_args()
 
 
-def main():
-	args = parse_args()
+def main(
+	images_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/1images",
+	layer_index: int = 3,
+	feature_index: int = 214,
+	token_reduce: str = "mean",
+	target_norm: str = "sum1",
+	lrp_rule: str = "epsilon",
+	lrp_alpha: float = 1.0,
+	lrp_beta: float = 0.0,
+	lrp_epsilon: float = 1e-6,
+	device: str = "cpu",
+	output_csv: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/lrp_result.csv",
+	min_size_test: int = 320,
+	max_size_test: int = 512,
+	limit_images: int = 0,
+	which_module: str = "encoder",
+	start_at: str = "layer",
+	method: str = "gradinput",
+):
+	"""Programmierbarer Einstiegspunkt mit denselben Parametern wie der CLI-Parser.
+
+	Hinweise:
+	- ``layer_index`` ist 1-basiert (wie zuvor in der CLI).
+	- ``limit_images``: 0 oder negativ bedeutet alle Bilder (intern wird ``None`` übergeben).
+	"""
 	logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
 	run_analysis(
-		images_dir=args.images_dir,
-		layer_index=args.layer_index,
-		feature_index=args.feature_index,
-		output_csv=args.output_csv,
-		device=args.device,
-		token_reduce=args.token_reduce,
-		target_norm=args.target_norm,
-		min_size_test=args.min_size_test,
-		max_size_test=args.max_size_test,
-		limit_images=(None if args.limit_images is None or args.limit_images <= 0 else args.limit_images),
-		lrp_rule=args.lrp_rule,
-		lrp_alpha=args.lrp_alpha,
-		lrp_beta=args.lrp_beta,
-		lrp_epsilon=args.lrp_epsilon,
-		which_module=args.which_module,
-		start_at=args.start_at,
-		method=args.method,
+		images_dir=images_dir,
+		layer_index=layer_index,
+		feature_index=feature_index,
+		output_csv=output_csv,
+		device=device,
+		token_reduce=token_reduce,
+		target_norm=target_norm,
+		min_size_test=min_size_test,
+		max_size_test=max_size_test,
+		limit_images=(None if limit_images is None or limit_images <= 0 else limit_images),
+		lrp_rule=lrp_rule,
+		lrp_alpha=lrp_alpha,
+		lrp_beta=lrp_beta,
+		lrp_epsilon=lrp_epsilon,
+		which_module=which_module,
+		start_at=start_at,
+		method=method,
 	)
 
 
 if __name__ == "__main__":
-	main()
+	# Rückwärtskompatibler CLI-Einstiegspunkt
+	_args = parse_args()
+	main(
+		images_dir=_args.images_dir,
+		layer_index=_args.layer_index,
+		feature_index=_args.feature_index,
+		token_reduce=_args.token_reduce,
+		target_norm=_args.target_norm,
+		lrp_rule=_args.lrp_rule,
+		lrp_alpha=_args.lrp_alpha,
+		lrp_beta=_args.lrp_beta,
+		lrp_epsilon=_args.lrp_epsilon,
+		device=_args.device,
+		output_csv=_args.output_csv,
+		min_size_test=_args.min_size_test,
+		max_size_test=_args.max_size_test,
+		limit_images=_args.limit_images,
+		which_module=_args.which_module,
+		start_at=_args.start_at,
+		method=_args.method,
+	)

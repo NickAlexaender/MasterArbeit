@@ -217,43 +217,44 @@ def build_model_and_load_weights(weights_path: str) -> torch.nn.Module:
     return model
 
 
-def gather_images() -> List[str]:
-    """Stellt eine Liste von Bildpfaden zusammen aus dem rot-Verzeichnis."""
-    image_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/rot"
-    
+def gather_images(image_dir: str) -> List[str]:
+    """Stellt eine Liste von Bildpfaden zusammen aus dem angegebenen Verzeichnis."""
     if not os.path.exists(image_dir):
         print(f"⚠️ Verzeichnis nicht gefunden: {image_dir}")
         return []
-    
-    # Alle Bilddateien aus dem rot-Verzeichnis sammeln
+    # Alle Bilddateien aus dem Verzeichnis sammeln
     image_files = []
     for filename in os.listdir(image_dir):
-        if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+        if filename.lower().endswith((".jpg", ".jpeg", ".png")):
             full_path = os.path.join(image_dir, filename)
             image_files.append(full_path)
-    
     print(f"📁 Gefundene Bilder in {image_dir}: {len(image_files)}")
     return sorted(image_files)  # Sortiert für konsistente Reihenfolge
 
 
-def main():
+def main(
+    images_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/rot",
+    weights_path: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_final.pth",
+    output_dir: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output", "encoder")),
+):
     setup_logger(name="maskdino")
-
-    weights_path = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_final.pth"
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Gewichte nicht gefunden: {weights_path}")
+
+    # Ausgabeordner vorbereiten
+    os.makedirs(output_dir, exist_ok=True)
 
     print("🔧 Baue Modell und lade Gewichte…")
     model = build_model_and_load_weights(weights_path)
 
     print("🖼️  Sammle Bilder…")
-    image_list = gather_images()
+    image_list = gather_images(images_dir)
     if not image_list:
         # Für den Start tolerieren wir eine leere Liste, aber melden es sichtbar
         print("⚠️ Keine Bilder gefunden – Übergabe erfolgt mit leerer Liste.")
 
     print("➡️  Übergabe an weights_extraction_transformer_encoder.accept_weights_model_images …")
-    accept_weights_model_images(weights_path, model, image_list)
+    accept_weights_model_images(weights_path, model, image_list, base_out_layers=output_dir)
     print("✅ Übergabe abgeschlossen.")
 
 

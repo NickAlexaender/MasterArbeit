@@ -164,7 +164,12 @@ def _register_encoder_shapes_hook(model: torch.nn.Module) -> Optional[Any]:
     return h
 
 
-def accept_weights_model_images(weights_path: str, model: torch.nn.Module, image_list: List[str]) -> Dict[str, Dict[str, np.ndarray]]:
+def accept_weights_model_images(
+    weights_path: str,
+    model: torch.nn.Module,
+    image_list: List[str],
+    base_out_layers: Optional[str] = None,
+) -> Dict[str, Dict[str, np.ndarray]]:
     """Einfacher Übergabepunkt für die nächsten Schritte der Analyse-Pipeline.
 
     Parameter:
@@ -191,7 +196,8 @@ def accept_weights_model_images(weights_path: str, model: torch.nn.Module, image
     # 2) Vorbereitung: Ausgabeordner und CSV-Bereinigung (Duplikate vermeiden)
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     # Globaler Ordner für Layer-CSV-Dateien (eine CSV je Layer)
-    base_out_layers = os.path.join(project_root, "output", "encoder")
+    if base_out_layers is None:
+        base_out_layers = os.path.join(project_root, "output", "encoder")
     os.makedirs(base_out_layers, exist_ok=True)
 
     def _clear_existing_csvs(base_dir: str) -> None:
@@ -350,8 +356,8 @@ def accept_weights_model_images(weights_path: str, model: torch.nn.Module, image
                         # N_tokens
                         n_tokens = int(sum(int(h) * int(w) for (h, w) in spatial_shapes))
                         image_id = os.path.splitext(os.path.basename(img_path))[0]
-                        # Per-Bild-Ordner nur für shapes.json
-                        base_out_image = os.path.join(project_root, "output", "encoder", image_id)
+                        # Per-Bild-Ordner für shapes.json relativ zu base_out_layers (output_dir)
+                        base_out_image = os.path.join(base_out_layers, image_id)
                         os.makedirs(base_out_image, exist_ok=True)
                         json_path = os.path.join(base_out_image, "shapes.json")
                         payload = {

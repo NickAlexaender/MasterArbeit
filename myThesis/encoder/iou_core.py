@@ -1,33 +1,12 @@
 """
-Grundstruktur für IoU-Berechnung auf Basis der vorbereiteten Inputs aus
-`myThesis/encoder/calculate_IoU.py`.
+Rein numerische Kernlogik für Heatmaps, Binarisierung und IoU.
 
-Eingabe (pro Eintrag):
-- layer_idx: int
-- image_idx: int
-- feature_idx: int
-- tokens: np.ndarray, Shape (N,) – Tokens für EIN Feature über alle Level
-- shapes: Dict – enthält spatial_shapes [[H,W],...], level_start_index [...], input_size [H_in,W_in]
-- mask_input: np.ndarray[bool], Shape (H_in, W_in)
-
-Kernschritte:
-- Tokens je Level mittels shapes (level_start_index, spatial_shapes) in Karten (H_i, W_i) rekonstruieren
-- Auf Inputgröße skalieren
-- Binarisieren (Schwellenwertstrategie konfigurierbar)
-- IoU mit mask_input berechnen
-
-
-Überlegung:
-Gerade erstellen wir eine kombinierte_IoU. Pro-Level-IoU könnte allerdings auch interessant sein.
-
-Pro-Level-IoU: sagt dir, auf welcher Auflösung/Skala eine Unit auf ein Konzept anspringt.
-
-Kombiniert-IoU: sagt dir, ob die Unit insgesamt (über alle Skalen hinweg) zuverlässig ein Konzept abbildet.
+Dieses Modul enthält keinerlei Datei-/Pfad- oder OpenCV-spezifische Logik außer dem Resize.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -37,22 +16,10 @@ try:
 except Exception:  # pragma: no cover
 	cv2 = None
 
+from .models import IoUCombinedResult
 
-# -----------------------------
-# Datenstrukturen
-# -----------------------------
 
-@dataclass
-class IoUCombinedResult:
-	"""Ergebnis für eine kombinierte Heatmap über alle Levels (auf Inputgröße)."""
-	layer_idx: int
-	image_id: str  # String-ID (z.B. "image 1") statt numerischer Index
-	feature_idx: int
-	map_shape: Tuple[int, int]  # entspricht input_size (Hin, Win)
-	threshold: float
-	iou: float
-	positives: int
-	heatmap: Optional[np.ndarray] = None
+logger = logging.getLogger(__name__)
 
 
 # -----------------------------
@@ -86,7 +53,7 @@ def tokens_to_level_maps(tokens: np.ndarray, shapes: Dict) -> List[np.ndarray]:
 def resize_to_input(m: np.ndarray, input_size: Sequence[int]) -> np.ndarray:
 	"""Skaliert Karte m (H,W) auf (H_in,W_in) als float32."""
 	if cv2 is None:
-		raise RuntimeError("OpenCV (cv2) benötigt für Resize.")
+		raise RuntimeError("OpenCV (cv2) wird für Resize benötigt. Bitte 'opencv-python' (oder -headless) installieren.")
 	Hin, Win = int(input_size[0]), int(input_size[1])
 	return cv2.resize(m.astype(np.float32), (Win, Hin), interpolation=cv2.INTER_LINEAR)
 

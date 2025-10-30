@@ -52,6 +52,7 @@ import os
 import sys
 from typing import List, Tuple
 import torch
+import argparse
 
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog, DatasetCatalog
@@ -271,12 +272,11 @@ def build_model_and_load_weights(weights_path: str) -> Tuple[torch.nn.Module, Li
 	return model, classes
 
 
-def gather_images() -> List[Tuple[str, str]]:
+def gather_images(image_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/rot") -> List[Tuple[str, str]]:
 	"""
 	Stellt eine Liste von (image_id, image_path) Tupeln zusammen.
 	image_id wird aus dem Dateinamen extrahiert (z.B. "image 1.jpg" -> "image_1")
 	"""
-	image_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/rot"
 	candidates = []
 	
 	# Durchsuche das rot-Verzeichnis nach Bilddateien
@@ -321,10 +321,13 @@ def _require(name: str) -> None:
 		)
 
 
-def main():
+def main(    
+    images_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/rot",
+    weights_path: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_final.pth",
+    output_dir: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output", "encoder")),
+):
 	setup_logger(name="maskdino")
-
-	weights_path = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_final.pth"
+ 
 	if not os.path.exists(weights_path):
 		raise FileNotFoundError(f"Gewichte nicht gefunden: {weights_path}")
 
@@ -332,7 +335,7 @@ def main():
 	model, classes = build_model_and_load_weights(weights_path)
 
 	print("🖼️  Sammle Bilder…")
-	image_list = gather_images()
+	image_list = gather_images(images_dir)
 	if not image_list:
 		# Für den Start tolerieren wir eine leere Liste, aber melden es sichtbar
 		print("⚠️ Keine Bilder gefunden – Analyse erfolgt ggf. mit leerer Liste.")
@@ -355,7 +358,8 @@ def main():
 	#fn_attach = globals().get("attach_decoder_hooks")
 	# fn_detach = globals().get("detach_decoder_hooks")
  
-	accept_weights_model_images(weights_path, model, image_list)
+	print(f"📁 Ausgabeziel: {output_dir}")
+	accept_weights_model_images(weights_path, model, image_list, output_dir=output_dir)
 
 	print("🪝 Registriere Decoder-Hooks…")
 	#hook_handles = fn_attach(decoder)  # type: ignore[operator]
