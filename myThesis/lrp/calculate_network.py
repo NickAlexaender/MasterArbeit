@@ -213,7 +213,7 @@ def run_lrp_for(
 			which_module=which_module,
 			output_csv=out_csv,
 			# Keep the rest as defaults; expose limit_images to be optionally stricter
-			limit_images=(0 if limit_images is None else max(0, int(limit_images))),
+			#limit_images=(0 if limit_images is None else max(0, int(limit_images))),
 		)
 
 

@@ -1,12 +1,3 @@
-"""
-Baustein 1 der Aufsplittung:
-- Baut das MaskDINO-Modell (Konfiguration + Laden der finetuned Gewichte)
-- Stellt eine Liste von Bildern zusammen (aktuell: eines als Beispiel)
-- Ruft eine Übergabe-Funktion auf, die (weights_path, model, image_list) entgegennimmt
-
-Dieser Baustein enthält KEINE Analyse-Logik mehr – nur Setup & Handover.
-"""
-
 # --- Kompatibilitätsfixe (Pillow/NumPy) ---
 try:
     import PIL.Image
@@ -95,7 +86,7 @@ mythesis_path = "/Users/nicklehmacher/Alles/MasterArbeit"
 if mythesis_path not in sys.path:
     sys.path.insert(0, mythesis_path)
 
-# Übergabe-Funktion importieren (Baustein 2)
+# Übergabe-Funktion importieren
 # Import der Übergabe-Funktion aus der Nachbar-Datei
 from myThesis.encoder.weights_extraction_transformer_encoder import accept_weights_model_images
 

@@ -8,17 +8,6 @@ Funktion:
 - Aggregiert Beiträge der vorherigen Features (Kanäle) über alle Bilder im Ordner
 - Exportiert Ergebnisse als CSV-Datei
 
-Nutzung:
-- Programmatisch: rufe die Funktion ``main(...)`` direkt auf und übergebe Parameter.
-- CLI (kompatibel): starte das Skript wie zuvor mit Argumenten.
-
-Beispiel (CLI, macOS, zsh):
-
-		python myThesis/lrp/calc_lrp.py \
-		--images-dir /Users/nicklehmacher/Alles/MasterArbeit/myThesis/image \
-		--layer-index 3 \
-		--feature-index 235 \
-		--output-csv /Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/lrp_layer3_feat235.csv
 """
 
 from __future__ import annotations
@@ -462,18 +451,9 @@ def run_analysis(
 	layer_index: int,
 	feature_index: int,
 	output_csv: str,
-	device: str = "cpu",
-	token_reduce: str = "mean",
 	target_norm: str = "sum1",
-	min_size_test: int = 320,
-	max_size_test: int = 512,
-	limit_images: int | None = None,
-	lrp_rule: str = "epsilon",
-	lrp_alpha: float = 1.0,
-	lrp_beta: float = 0.0,
 	lrp_epsilon: float = 1e-6,
 	which_module: str = "encoder",
-	start_at: str = "layer",
 	method: str = "lrp",
 	index_kind: str = "auto",
 ):
@@ -483,7 +463,8 @@ def run_analysis(
 	if not os.path.exists(DEFAULT_WEIGHTS):
 		raise FileNotFoundError(f"Gewichtsdatei nicht gefunden: {DEFAULT_WEIGHTS}")
 
-	# Konfiguration erstellen
+	# Konfiguration erstellen (immer CPU)
+	device = "cpu"
 	cfg = build_cfg_for_inference(device=device)
 	setup_logger()  # detectron2 logger
 
@@ -506,8 +487,8 @@ def run_analysis(
 	model.eval()
 	model.to(device)
 
-	# LRP Tracer-Konfiguration (nur benötigt, wenn method == 'lrp')
-	lrp_cfg = LRPConfig(rule_linear=lrp_rule, rule_conv=lrp_rule, alpha=lrp_alpha, beta=lrp_beta, epsilon=lrp_epsilon)
+	# LRP Tracer-Konfiguration (nur benötigt, wenn method == 'lrp'). Immer epsilon-Regel.
+	lrp_cfg = LRPConfig(rule_linear="epsilon", rule_conv="epsilon", alpha=1.0, beta=0.0, epsilon=lrp_epsilon)
 	tracer = LRPTracer(lrp_cfg)
 
 	# Encoder- oder Decoder-Layer finden
@@ -556,15 +537,8 @@ def run_analysis(
 	agg_attr: Tensor | None = None
 	processed = 0
 
-	# Vorverarbeiter analog zum DefaultPredictor
-	# Erlaube kleinere Eingangsgrößen zur Speicherreduktion
-	resize_aug = T.ResizeShortestEdge(
-		short_edge_length=min_size_test,
-		max_size=max_size_test,
-	)
-
-	if limit_images is not None and limit_images > 0:
-		img_files = img_files[:limit_images]
+	# Vorverarbeiter analog zum DefaultPredictor (feste Werte)
+	resize_aug = T.ResizeShortestEdge(short_edge_length=320, max_size=512)
 
 	logger.info(f"Verarbeite {len(img_files)} Bilder aus: {images_dir}")
 	logger.debug("Dateiliste:\n" + "\n".join(img_files))
@@ -630,15 +604,8 @@ def run_analysis(
 								y_c = c["y"]
 								candidates.append((full_name, module, y_c))
 
-					# Startmodul festlegen (deterministisch über Option)
+					# Startmodul immer der gewählte Layer
 					start_name, start_module, y_start = chosen_name, chosen_layer, y_layer
-					if start_at in ("deepest", "auto") and candidates:
-						same_shape = [t for t in candidates if tuple(t[2].shape) == tuple(y_layer.shape)]
-						pool = same_shape if same_shape else candidates
-						start_name, start_module, y_start = sorted(pool, key=lambda x: x[0])[-1]
-					elif start_at == "auto" and not candidates:
-						pass
-					# else: layer
 
 					# Pass 1 Cleanup (alle Hooks entfernen, Caches leeren)
 					tracer.remove(); tracer.store.clear(); tmp_tap.remove() if tmp_tap else None
@@ -653,7 +620,7 @@ def run_analysis(
 						_ = model(batched_inputs)
 
 					# Zielrelevanz erstellen und LRP durchführen
-					R_out = build_target_relevance(y_start, feature_index, token_reduce, target_norm, index_axis=index_axis)
+					R_out = build_target_relevance(y_start, feature_index, "mean", target_norm, index_axis=index_axis)
 					rels = propagate_lrp(model, tracer, start_module, R_out, lrp_cfg)
 					R_in = rels.get(start_module)
 					if R_in is None:
@@ -695,7 +662,7 @@ def run_analysis(
 				y_layer = cache["y"]
 				x_layer = cache["x"]
 				# Zielmaskierung nur auf feature_index
-				R_out = build_target_relevance(y_layer, feature_index, token_reduce, target_norm, index_axis=index_axis)
+				R_out = build_target_relevance(y_layer, feature_index, "mean", target_norm, index_axis=index_axis)
 				# Rückwärts: d(y_feature) nach x
 				# Wir bauen einen Skalar, indem wir die Zielmaske mit y_layer multiplizieren und summieren
 				loss = (R_out * y_layer).sum()
@@ -747,21 +714,8 @@ def run_analysis(
 							y_c = c["y"]
 							candidates.append((full_name, module, y_c))
 
-				# Startmodul festlegen (deterministisch über Option)
+				# Startmodul immer der gewählte Layer
 				start_name, start_module, y_start = chosen_name, chosen_layer, y_layer
-				if start_at in ("deepest", "auto") and candidates:
-					same_shape = [t for t in candidates if tuple(t[2].shape) == tuple(y_layer.shape)]
-					pool = same_shape if same_shape else candidates
-					start_name, start_module, y_start = sorted(pool, key=lambda x: x[0])[-1]
-				elif start_at == "auto" and not candidates:
-					# bleibt beim Layer
-					pass
-				elif start_at == "layer":
-					# explizit nichts tun
-					pass
-				else:
-					# Fallback auf Layer
-					start_name, start_module, y_start = chosen_name, chosen_layer, y_layer
 
 				# Pass 1 Cleanup (alle Hooks entfernen, Caches leeren)
 				tracer.remove(); tracer.store.clear(); tmp_tap.remove() if tmp_tap else None
@@ -776,7 +730,7 @@ def run_analysis(
 					_ = model(batched_inputs)
 
 				# Zielrelevanz erstellen und LRP durchführen
-				R_out = build_target_relevance(y_start, feature_index, token_reduce, target_norm, index_axis=index_axis)
+				R_out = build_target_relevance(y_start, feature_index, "mean", target_norm, index_axis=index_axis)
 				rels = propagate_lrp(model, tracer, start_module, R_out, lrp_cfg)
 				R_in = rels.get(start_module)
 				if R_in is None:
@@ -827,13 +781,8 @@ def run_analysis(
 			"layer_index": layer_index,
 			"layer_name": chosen_name,
 			"feature_index": feature_index,
-			"rule": lrp_rule,
-			"alpha": lrp_alpha,
-			"beta": lrp_beta,
 			"epsilon": lrp_epsilon,
 			"module_role": layer_role,
-			"start_at": start_at,
-			"token_reduce": token_reduce,
 			"target_norm": target_norm,
 			"method": method,
 		}
@@ -875,37 +824,11 @@ def parse_args() -> argparse.Namespace:
 		help="Kanalindex (Feature) im gewählten Layer (z.B. 235)",
 	)
 	parser.add_argument(
-		"--token-reduce",
-		type=str,
-		default="mean",
-		choices=["mean", "max"],
-		help="Aggregation über Tokens/Positionen für das Zielfeature",
-	)
-	parser.add_argument(
 		"--target-norm",
 		type=str,
 		default="sum1",
 		choices=["sum1", "sumT", "none"],
 		help="Norm der Zielrelevanz: sum1 (Summe=1), sumT (Summe=T), none (keine Norm)",
-	)
-	parser.add_argument(
-		"--lrp-rule",
-		type=str,
-		default="epsilon",
-		choices=["epsilon", "zplus", "alphabeta"],
-		help="LRP-Regel für Linear/Conv",
-	)
-	parser.add_argument(
-		"--lrp-alpha",
-		type=float,
-		default=1.0,
-		help="Alpha für αβ-Regel",
-	)
-	parser.add_argument(
-		"--lrp-beta",
-		type=float,
-		default=0.0,
-		help="Beta für αβ-Regel",
 	)
 	parser.add_argument(
 		"--lrp-epsilon",
@@ -914,35 +837,10 @@ def parse_args() -> argparse.Namespace:
 		help="Epsilon-Stabilisator für ε/z+",
 	)
 	parser.add_argument(
-		"--device",
-		type=str,
-		default="cpu",
-		choices=["cpu", "cuda"],
-		help="Gerät für Inferenz",
-	)
-	parser.add_argument(
 		"--output-csv",
 		type=str,
 		default="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/lrp_result.csv",
 		help="Pfad zur Ausgabedatei (CSV)",
-	)
-	parser.add_argument(
-		"--min-size-test",
-		type=int,
-		default=320,
-		help="Kleinste Bildkante nach Resize (Speicherreduktion)",
-	)
-	parser.add_argument(
-		"--max-size-test",
-		type=int,
-		default=512,
-		help="Maximalgröße lange Kante nach Resize (Speicherreduktion)",
-	)
-	parser.add_argument(
-		"--limit-images",
-		type=int,
-		default=0,
-		help="Maximale Anzahl Bilder, die verarbeitet werden (0 oder negativ = alle)",
 	)
 	parser.add_argument(
 		"--which-module",
@@ -952,16 +850,9 @@ def parse_args() -> argparse.Namespace:
 		help="Wähle Encoder oder Decoder für die LRP-Analyse",
 	)
 	parser.add_argument(
-		"--start-at",
-		type=str,
-		default="layer",
-		choices=["layer", "deepest", "auto"],
-		help="Bestimme, wo im gewählten Block die LRP startet: direkt am Layer (stabil) oder am tiefsten passenden Untermodule",
-	)
-	parser.add_argument(
 		"--method",
 		type=str,
-		default="gradinput",
+		default="lrp",
 		choices=["gradinput", "lrp"],
 		help="Attributionsmethode: gradinput (Grad*Input am Layer-Eingang) oder lrp (LRP-Regeln)",
 	)
@@ -972,20 +863,11 @@ def main(
 	images_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/1images",
 	layer_index: int = 3,
 	feature_index: int = 214,
-	token_reduce: str = "mean",
 	target_norm: str = "sum1",
-	lrp_rule: str = "epsilon",
-	lrp_alpha: float = 1.0,
-	lrp_beta: float = 0.0,
 	lrp_epsilon: float = 1e-6,
-	device: str = "cpu",
 	output_csv: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/lrp_result.csv",
-	min_size_test: int = 320,
-	max_size_test: int = 512,
-	limit_images: int = 0,
 	which_module: str = "encoder",
-	start_at: str = "layer",
-	method: str = "gradinput",
+	method: str = "lrp",
 ):
 	"""Programmierbarer Einstiegspunkt mit denselben Parametern wie der CLI-Parser.
 
@@ -1000,18 +882,9 @@ def main(
 		layer_index=layer_index,
 		feature_index=feature_index,
 		output_csv=output_csv,
-		device=device,
-		token_reduce=token_reduce,
 		target_norm=target_norm,
-		min_size_test=min_size_test,
-		max_size_test=max_size_test,
-		limit_images=(None if limit_images is None or limit_images <= 0 else limit_images),
-		lrp_rule=lrp_rule,
-		lrp_alpha=lrp_alpha,
-		lrp_beta=lrp_beta,
 		lrp_epsilon=lrp_epsilon,
 		which_module=which_module,
-		start_at=start_at,
 		method=method,
 	)
 
@@ -1023,18 +896,9 @@ if __name__ == "__main__":
 		images_dir=_args.images_dir,
 		layer_index=_args.layer_index,
 		feature_index=_args.feature_index,
-		token_reduce=_args.token_reduce,
 		target_norm=_args.target_norm,
-		lrp_rule=_args.lrp_rule,
-		lrp_alpha=_args.lrp_alpha,
-		lrp_beta=_args.lrp_beta,
 		lrp_epsilon=_args.lrp_epsilon,
-		device=_args.device,
 		output_csv=_args.output_csv,
-		min_size_test=_args.min_size_test,
-		max_size_test=_args.max_size_test,
-		limit_images=_args.limit_images,
 		which_module=_args.which_module,
-		start_at=_args.start_at,
 		method=_args.method,
 	)

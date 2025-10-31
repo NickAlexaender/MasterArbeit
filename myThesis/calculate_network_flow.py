@@ -42,7 +42,7 @@ concept="rot"
 basic_root="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/"
 
 
-
+'''
 nd_on_transformer_encoder.main(
     images_dir=images_dir,
     weights_path=weights_path,
@@ -82,7 +82,7 @@ calculate_IoU_for_decoder.main_network_dissection_per_query(
     decoder_out_dir=f"{basic_root}output/{model}/{train_state}/decoder",
     export_root=f"{basic_root}output/{model}/{train_state}/{concept}/decoder", # decoder zu /{concept}/decoder
     )
-
+'''
 calculate_network.main(
         images_dir=images_dir,
         output_root=f"{basic_root}output/{model}/{train_state}",
@@ -112,14 +112,22 @@ visualise_network.main(
     k=5
     )
 
+### Nächste Schritte:
 
+# TODO: Freitag: LRP überarbeiten, sodass die Aussage der Werte die richtige ist! (Aufaddieren der LRP-Werte -> Gesamteinfluss muss 1 sein)
+# - vereinfachen -> ganzen Schnickschnack entfernen
+# - aufteilen auf mehrere Dateien
+# - genau definieren was ich wissen will und calculieren.
+# TODO: Samstag: Einmal für 100 Bilder durchlaufen lassen - Zeit aufnehmen
 
-# TODO: für Mittwoch: Hier das ganze fertig bringen -> für Decoder und für LRP
-# TODO: für Donnerstag: Auf Datenspeicher bringen und mit 100 Bildern zum laufen bringen.
-# TODO: für Freitag: Einmal für Rot durchlaufen lassen - Zeit aufnehmen
+# TODO: Mittwoch: Zweites Modell (Butterflys) integrieren
+# TODO: Sonntag: Calculate IoU für Decoder und Encoder genauer untersuchen (-> mit KI durchleuchten)
 
-# Anschließend: Encoder, Decoder und LRP durchgehen -> Code glatt ziehen -> Genau verstehen, was wann wo passiert!
+# TODO: Mittwoch - Frei
+# TODO: Donnerstag - Frei
 
-# TODO: Code für 100 Bilder zum laufen bringen.
-# TODO: Aufaddieren der LRP-Werte -> Gesamteinfluss muss 1 sein.
-# TODO: Code umschreiben, dass alle Modelle, Trainingszustände und Konzepte durchlaufen werden.
+# TODO: Donnerstag: Umbauen, sodass es für verschiedene Modelle funktioniert
+# TODO: Freitag: Code in myThesis/calculate_network_flow.py so umbauen, dass alle Modelle, Trainingszustände und Konzepte durchlaufen können.
+
+# TODO. Mittwoch: Jeden Code einzeln durchgehen - logic checken und kommentieren.
+
