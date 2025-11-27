@@ -30,6 +30,7 @@ def main(
 	output_csv: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/lrp_result.csv",
 	which_module: str = "encoder",
 	method: str = "lrp",
+    weights_path: str | None = None,
 ):
 	"""Programmierbarer Einstiegspunkt mit denselben Parametern wie der CLI-Parser.
 
@@ -48,6 +49,7 @@ def main(
 		lrp_epsilon=lrp_epsilon,
 		which_module=which_module,
 		method=method,
+		weights_path=weights_path,
 	)
 
 
@@ -63,4 +65,5 @@ if __name__ == "__main__":
 		output_csv=_args.output_csv,
 		which_module=_args.which_module,
 		method=_args.method,
+		weights_path=getattr(_args, "weights_path", None),
 	)

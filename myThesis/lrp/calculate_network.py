@@ -188,6 +188,7 @@ def run_lrp_for(
 	lrp_encoder_dir: str = DEFAULT_LRP_ENCODER_DIR,
 	lrp_decoder_dir: str = DEFAULT_LRP_DECODER_DIR,
 	limit_images: Optional[int] = None,
+	weights_path: Optional[str] = None,
 ) -> None:
 	# Import here to avoid heavy import time when only listing
 	from myThesis.lrp import calc_lrp
@@ -212,6 +213,7 @@ def run_lrp_for(
 			feature_index=r.feature_idx,
 			which_module=which_module,
 			output_csv=out_csv,
+			weights_path=weights_path,
 			# Keep the rest as defaults; expose limit_images to be optionally stricter
 			#limit_images=(0 if limit_images is None else max(0, int(limit_images))),
 		)
@@ -232,6 +234,8 @@ def main(
 	lrp_encoder_dir: Optional[str] = None,
 	lrp_decoder_dir: Optional[str] = None,
 	summary_csv: Optional[str] = None,
+	# Model weights override (optional)
+	weights_path: Optional[str] = None,
 ) -> None:
 	# Resolve all effective paths based on overrides
 	paths = _compute_paths(
@@ -262,6 +266,7 @@ def main(
 			lrp_encoder_dir=paths["lrp_encoder_dir"],
 			lrp_decoder_dir=paths["lrp_decoder_dir"],
 			limit_images=limit_images,
+			weights_path=weights_path,
 		)
 
 
@@ -275,6 +280,8 @@ if __name__ == "__main__":
 	# High-level
 	images_dir_env = os.environ.get("IMAGES_DIR", "").strip() or None
 	output_root_env = os.environ.get("OUTPUT_ROOT", "").strip() or None
+	# Optional model weights override
+	weights_path_env = os.environ.get("WEIGHTS_PATH", "").strip() or None
 	# Fine-grained (all optional)
 	encoder_rot_dir_env = os.environ.get("ENCODER_ROT_DIR", "").strip() or None
 	decoder_dir_env = os.environ.get("DECODER_DIR", "").strip() or None
@@ -307,5 +314,6 @@ if __name__ == "__main__":
 		lrp_encoder_dir=lrp_encoder_dir_env,
 		lrp_decoder_dir=lrp_decoder_dir_env,
 		summary_csv=summary_csv_env,
+		weights_path=weights_path_env,
 	)
 

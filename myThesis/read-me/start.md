@@ -18,6 +18,7 @@ pip install -r requirements.txt
 
 
 
+
 # Run it all:
 
 python myThesis/conceptualize_image.py

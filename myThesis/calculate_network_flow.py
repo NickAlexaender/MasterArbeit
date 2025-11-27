@@ -92,6 +92,7 @@ calculate_network.main(
         lrp_encoder_dir=f"{basic_root}output/{model}/{train_state}/{concept}/lrp/encoder",
         lrp_decoder_dir=f"{basic_root}output/{model}/{train_state}/{concept}/lrp/decoder",
         summary_csv=f"{basic_root}output/{model}/{train_state}/{concept}/lrp/top_features.csv",
+        weights_path=weights_path,
     )
 
 visualise_network.main(

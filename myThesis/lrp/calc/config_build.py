@@ -22,13 +22,22 @@ except Exception as e:  # pragma: no cover - defensive
         f"MaskDINO konnte nicht importiert werden: {e}. Prüfe Pfad {MASKDINO_PATH}"
     )
 
-DEFAULT_WEIGHTS = (
+# Standardmäßig die finetuneten Gewichte mit 23 Klassen verwenden, um Shape-Mismatches zu vermeiden
+FINETUNED_WEIGHTS = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_final.pth"
+COCO_WEIGHTS_FALLBACK = (
     "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/weights/"
     "maskdino_r50_50ep_300q_hid1024_3sd1_instance_maskenhanced_mask46.1ap_box51.5ap.pth"
 )
 
+# Erlaube optional Override via Umgebungsvariable und sorge für robusten Fallback
+DEFAULT_WEIGHTS = os.environ.get("MYTHESIS_WEIGHTS", FINETUNED_WEIGHTS)
+if not os.path.exists(DEFAULT_WEIGHTS):  # pragma: no cover - defensive
+    # Wenn der finetunete Pfad fehlt, auf die ursprünglichen COCO-Gewichte zurückfallen
+    # (führt wieder zu 80↔23-Shape-Warnungen, ist aber besser als Abbruch)
+    DEFAULT_WEIGHTS = COCO_WEIGHTS_FALLBACK
 
-def build_cfg_for_inference(device: str = "cpu"):
+
+def build_cfg_for_inference(device: str = "cpu", weights_path: str | None = None):
     """Erzeuge eine Inferenz-Konfiguration, die mit den Gewichten kompatibel ist.
 
     Wir lehnen uns eng an myThesis/fine-tune.py an, aber nur mit den nötigen Schlüsseln
@@ -114,7 +123,9 @@ def build_cfg_for_inference(device: str = "cpu"):
     cfg.INPUT.MAX_SIZE_TEST = 1333
 
     # Geräte/Weg
-    cfg.MODEL.WEIGHTS = DEFAULT_WEIGHTS
+    # Erlaube optionales Überschreiben des Gewichts-Pfads
+    selected_weights = weights_path if weights_path else DEFAULT_WEIGHTS
+    cfg.MODEL.WEIGHTS = selected_weights
     cfg.MODEL.DEVICE = device
 
     # Minimal-Datasets (werden registriert, bevor das Model gebaut wird)
