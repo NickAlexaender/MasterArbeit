@@ -555,6 +555,10 @@ class LRP_MSDeformAttn(nn.Module, LRPModuleMixin):
         self.activations.deform_attention_weights = attention_weights.detach()
         self.activations.output = output.detach()
         
+        # WICHTIG: Setze auch activations.input für die generische Propagator-Prüfung
+        # Für MSDeformAttn ist input_flatten der Haupteingang
+        self.activations.input = input_flatten.detach()
+        
         # Projektionsgewichte (H, Dh, C)
         C = self.d_model
         H = self.n_heads

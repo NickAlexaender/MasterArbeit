@@ -276,8 +276,10 @@ def splat_to_level(
     # Bilineare Ecken
     corners = compute_bilinear_corners(x, y, H_l, W_l)
     
-    # Basis-Relevanz
+    # Basis-Relevanz - WICHTIG: Durch Anzahl der Köpfe dividieren für Konservierung!
+    # Jeder Kopf trägt 1/H_heads zur Gesamtrelevanz bei
     R_expanded = R_out.unsqueeze(2).unsqueeze(3).expand(-1, -1, H_heads, P, -1)
+    R_expanded = R_expanded / H_heads  # Normalisierung für Konservierung
     attn_expanded = attention_weights_level.unsqueeze(-1)
     base_R = R_expanded * attn_expanded
     

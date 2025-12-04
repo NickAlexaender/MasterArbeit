@@ -29,6 +29,11 @@ Beispiel:
 
 from __future__ import annotations
 
+# Warnungen unterdrücken (FutureWarnings von timm, torch.cuda.amp etc.)
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, message=".*torch.meshgrid.*")
+
 # WICHTIG: Kompatibilitäts-Patches müssen zuerst geladen werden
 from myThesis.lrp.do.compat import *  # Pillow/NumPy monkey patches
 
@@ -73,6 +78,9 @@ from myThesis.lrp.do.tensor_ops import aggregate_channel_relevance, build_target
 
 # Logger für dieses Modul
 logger = logging.getLogger("lrp.calc")
+
+# Globaler Cache für Modell-Wiederverwendung
+_MODEL_CACHE: dict = {}
 
 
 # =============================================================================
@@ -131,22 +139,81 @@ def _aggregate_relevance(vec: Tensor, axis: str) -> Tensor:
     if axis == "channel":
         return aggregate_channel_relevance(vec)
     
-    # Token-Aggregation
+    # Token/Query-Aggregation
+    # Für Decoder: vec hat Shape (Q, B, C) = (300, 1, 256)
+    # Für Encoder: vec hat Shape (T, B, C) = (tokens, 1, 256)
+    # Wir wollen einen Vektor der Länge Q bzw. T zurückgeben
     with torch.no_grad():
         if vec.dim() == 3:
-            # (B, T, C) -> pro Token summieren über Batch und Kanäle
-            return vec.sum(dim=(0, 2))
+            # Erkenne das Format anhand der Batch-Dimension
+            # Format (Q/T, B, C) -> B ist typischerweise 1 und an Position 1
+            if vec.shape[1] == 1 or vec.shape[1] < vec.shape[0]:
+                # Format ist (Q, B, C) - summiere über Batch und Channels
+                return vec.sum(dim=(1, 2))  # Ergebnis: (Q,) = (300,)
+            else:
+                # Format könnte (B, T, C) sein - summiere über Batch und Channels
+                return vec.sum(dim=(0, 2))  # Ergebnis: (T,)
         if vec.dim() == 2:
-            # (T, C) oder (B, C) -> über letzte Dim summieren
+            # (T, C) oder (Q, C) -> über Channels summieren
             return vec.sum(dim=1)
         if vec.dim() == 1:
             return vec
-        # Fallback: Token-Achse an Position 1 annehmen
+        # Fallback: Token-Achse an Position 0 annehmen (Q, ...)
         try:
-            Tdim = vec.shape[1]
-            return vec.movedim(1, 0).reshape(Tdim, -1).sum(dim=1)
+            Qdim = vec.shape[0]
+            return vec.reshape(Qdim, -1).sum(dim=1)
         except Exception:
             return vec.reshape(-1)
+
+
+def _get_or_load_model(weights_path: str, device: str = "cpu", use_cache: bool = True):
+    """Lädt oder holt das Modell aus dem Cache.
+    
+    Args:
+        weights_path: Pfad zu den Modellgewichten.
+        device: Gerät ('cpu' oder 'cuda').
+        use_cache: Wenn True, wird das Modell gecacht und wiederverwendet.
+        
+    Returns:
+        Tuple aus (model, cfg)
+    """
+    global _MODEL_CACHE
+    
+    cache_key = (weights_path, device)
+    
+    if use_cache and cache_key in _MODEL_CACHE:
+        logger.debug("Verwende gecachtes Modell")
+        return _MODEL_CACHE[cache_key]
+    
+    # Modell neu laden
+    cfg = build_cfg_for_inference(device=device, weights_path=weights_path)
+    
+    # Logger nur einmal initialisieren und auf WARNING setzen um "Loading from..." zu unterdrücken
+    if not logging.getLogger("detectron2").handlers:
+        setup_d2_logger()
+    logging.getLogger("detectron2").setLevel(logging.WARNING)
+    logging.getLogger("fvcore").setLevel(logging.WARNING)
+    
+    model = build_model(cfg)
+    DetectionCheckpointer(model).load(cfg.MODEL.WEIGHTS)
+    model.eval()
+    model.to(device)
+    
+    if use_cache:
+        _MODEL_CACHE[cache_key] = (model, cfg)
+        # logger.info(f"Modell gecacht für: {weights_path}")
+    
+    return model, cfg
+
+
+def clear_model_cache():
+    """Löscht den Modell-Cache und gibt Speicher frei."""
+    global _MODEL_CACHE
+    _MODEL_CACHE.clear()
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    logger.info("Modell-Cache geleert")
 
 
 # =============================================================================
@@ -167,6 +234,7 @@ def run_analysis(
     weights_path: Optional[str] = None,
     verbose: bool = True,
     num_queries: int = 300,
+    use_model_cache: bool = True,
 ) -> pd.DataFrame:
     """Führt die vollständige LRP-Analyse durch.
     
@@ -187,6 +255,7 @@ def run_analysis(
         weights_path: Optionaler Pfad zu Modellgewichten.
         verbose: Ausführliche Logging-Ausgabe.
         num_queries: Anzahl der Decoder-Queries (Standard: 300 für MaskDINO).
+        use_model_cache: Modell cachen für Wiederverwendung (spart ~10s bei mehreren Aufrufen).
         
     Returns:
         DataFrame mit den aggregierten Relevanzwerten.
@@ -195,7 +264,8 @@ def run_analysis(
         FileNotFoundError: Wenn keine Bilder oder Gewichte gefunden werden.
         ValueError: Bei ungültigen Parametern.
     """
-    logger.info("Starte LRP/Attribution-Analyse...")
+    print("LRP startet")
+    # logger.info("Starte LRP/Attribution-Analyse...")
     
     # Gewichte validieren
     chosen_weights = weights_path if weights_path else DEFAULT_WEIGHTS
@@ -206,23 +276,16 @@ def run_analysis(
     if method != "lrp":
         raise ValueError("Nur method='lrp' wird unterstützt.")
     
-    # Konfiguration erstellen
+    # Modell laden (mit Cache für Wiederverwendung)
     device = "cpu"
-    cfg = build_cfg_for_inference(device=device, weights_path=chosen_weights)
-    setup_d2_logger()
+    model, cfg = _get_or_load_model(chosen_weights, device=device, use_cache=use_model_cache)
     
     # Metadata registrieren
     _register_car_parts_metadata()
     
-    # Modell laden
-    model = build_model(cfg)
-    DetectionCheckpointer(model).load(cfg.MODEL.WEIGHTS)
-    model.eval()
-    model.to(device)
-    
     # Determinismus
     _setup_determinism()
-    logger.info(f"Determinismus aktiv: {DETERMINISTIC}, Seed={SEED}")
+    # logger.info(f"Determinismus aktiv: {DETERMINISTIC}, Seed={SEED}")
     
     # Layer finden
     if which_module == "decoder":
@@ -251,7 +314,7 @@ def run_analysis(
         raise IndexError(msg)
     
     chosen_name, chosen_layer = enc_layers[layer_index - 1]
-    logger.info(f"Gewähltes {layer_role}-Layer [{layer_index}]: {chosen_name} ({type(chosen_layer).__name__})")
+    # logger.info(f"Gewähltes {layer_role}-Layer [{layer_index}]: {chosen_name} ({type(chosen_layer).__name__})")
     
     # Index-Achse bestimmen
     if index_kind not in ("auto", "channel", "token"):
@@ -261,17 +324,17 @@ def run_analysis(
         if index_kind == "auto"
         else index_kind
     )
-    logger.info(f"Index-Achse: {index_axis} (index_kind={index_kind})")
+    # logger.info(f"Index-Achse: {index_axis} (index_kind={index_kind})")
     
     # Bilder sammeln
     img_files = collect_images(images_dir)
     if not img_files:
         raise FileNotFoundError(f"Keine Bilder in {images_dir} gefunden")
     
-    logger.info(f"Verarbeite {len(img_files)} Bilder aus: {images_dir}")
+    # logger.info(f"Verarbeite {len(img_files)} Bilder aus: {images_dir}")
     
-    # LRP Controller vorbereiten
-    controller = LRPController(model, device=device, eps=lrp_epsilon, verbose=verbose)
+    # LRP Controller vorbereiten (verbose=False um "Replaced..." und "ModelGraph Summary" zu unterdrücken)
+    controller = LRPController(model, device=device, eps=lrp_epsilon, verbose=False)
     controller.prepare()
     
     # Resize-Transformation
@@ -280,12 +343,12 @@ def run_analysis(
         max_size=getattr(cfg.INPUT, "MAX_SIZE_TEST", 1333),
     )
     
-    # Bestimme, ob wir alle Queries berechnen (nur für Decoder)
-    compute_all_queries = (which_module == "decoder")
-    queries_to_compute = num_queries if compute_all_queries else 1
+    # NEU: Decoder und Encoder arbeiten jetzt gleich - Layer-zu-Layer LRP
+    # für eine einzelne Query/Feature, die Relevanz auf vorherige Queries/Features verteilt
+    compute_all_queries = False  # Alte Logik deaktiviert
+    queries_to_compute = 1
     
-    if compute_all_queries:
-        logger.info(f"Decoder-Modus: Berechne Relevanz für alle {queries_to_compute} Queries")
+    # logger.info(f"{layer_role}-Modus: Layer-zu-Layer LRP für Feature/Query {feature_index}")
     
     # Aggregation über Bilder - jetzt mit Query-Dimension für Decoder
     # agg_attr_per_query[q] enthält die aggregierte Relevanz für Query q
@@ -293,6 +356,11 @@ def run_analysis(
     processed = 0
     
     for img_path in img_files:
+        # Neue Bild-Nachricht
+        img_name = os.path.basename(img_path)
+        feature_or_query = f"Feature {feature_index}" if not compute_all_queries else f"Queries 0-{queries_to_compute-1}"
+        print(f"LRP auf {layer_role} in Layer {layer_index} mit {feature_or_query} auf Bild ({img_name})")
+        
         try:
             # Bild laden
             pil_im = PIL.Image.open(img_path).convert("RGB")
@@ -320,79 +388,51 @@ def run_analysis(
                 "width": original_w,
             }]
             
-            # LRP für alle Queries auf einmal ausführen (nur ein Forward Pass pro Bild)
-            if compute_all_queries:
-                results = controller.run_all_queries(
-                    batched_inputs,
-                    num_queries=queries_to_compute,
-                    target_class=None,
-                    normalize="none",
-                )
+            # NEU: Einheitliche Layer-zu-Layer LRP für beide Module (Encoder und Decoder)
+            # chosen_name ist der Layer, von dem aus wir die Relevanz zurückpropagieren wollen
+            # feature_index ist der Query-Index (Decoder) oder Kanal-Index (Encoder)
+            result = controller.run(
+                batched_inputs,
+                target_class=None,
+                target_query=feature_index if which_module == "decoder" else 0,  # Query-Index für Decoder
+                normalize="none",
+                which_module=which_module,  # "encoder" oder "decoder"
+                target_feature=feature_index,  # Kanal-Index für Encoder, Query für Decoder
+                target_layer_name=chosen_name,  # Name des Ziel-Layers für Layer-zu-Layer LRP
+            )
                 
-                for query_idx, result in enumerate(results):
-                    if result.R_input is None:
-                        continue
-                    
-                    # Normalisieren
-                    R_norm = _normalize_tensor(result.R_input, target_norm)
-                    
-                    # Aggregieren
-                    attr = _aggregate_relevance(R_norm, index_axis)
-                    
-                    if not torch.isfinite(attr).all():
-                        continue
-                    
-                    if agg_attr_per_query[query_idx] is None:
-                        agg_attr_per_query[query_idx] = attr.clone()
-                    else:
-                        agg_attr_per_query[query_idx] += attr
-                    
-                    # Speicher sofort freigeben
-                    del R_norm, attr
-                
-                # Results-Liste sofort löschen nach Verarbeitung
-                del results
-                gc.collect()
+            if result.R_input is None:
+                # logger.warning(f"Keine Relevanz für {img_path}")
+                continue
+            
+            # Normalisieren
+            R_norm = _normalize_tensor(result.R_input, target_norm)
+            
+            # Aggregieren
+            attr = _aggregate_relevance(R_norm, index_axis)
+            
+            if not torch.isfinite(attr).all():
+                # logger.warning(f"Nicht-endliche Relevanzwerte bei {img_path}")
+                continue
+            
+            if agg_attr_per_query[0] is None:
+                agg_attr_per_query[0] = attr.clone()
             else:
-                # Encoder-Modus: nur eine Query
-                result = controller.run(
-                    batched_inputs,
-                    target_class=None,
-                    target_query=0,
-                    normalize="none",
-                )
-                
-                if result.R_input is None:
-                    logger.warning(f"Keine Relevanz für {img_path}")
-                    continue
-                
-                # Normalisieren
-                R_norm = _normalize_tensor(result.R_input, target_norm)
-                
-                # Aggregieren
-                attr = _aggregate_relevance(R_norm, index_axis)
-                
-                if not torch.isfinite(attr).all():
-                    logger.warning(f"Nicht-endliche Relevanzwerte bei {img_path}")
-                    continue
-                
-                if agg_attr_per_query[0] is None:
-                    agg_attr_per_query[0] = attr.clone()
-                else:
-                    agg_attr_per_query[0] += attr
+                agg_attr_per_query[0] += attr
             
             processed += 1
             
-            if verbose and processed % 10 == 0:
-                logger.info(f"Verarbeitet: {processed}/{len(img_files)}")
+            # if verbose and processed % 10 == 0:
+            #     logger.info(f"Verarbeitet: {processed}/{len(img_files)}")
                 
         except Exception as e:
             logger.exception(f"Fehler bei {img_path}: {e}")
             continue
-        finally:
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+    
+    # Speicher nur am Ende aufräumen (nicht nach jedem Bild - das ist zu teuer)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     # Aufräumen
     controller.cleanup()
@@ -412,90 +452,45 @@ def run_analysis(
             vec_len = len(agg_attr_per_query[q])
             break
     
-    logger.info(f"Aggregation abgeschlossen: {processed} Bilder, Vektor-Länge: {vec_len}, Queries: {queries_to_compute}")
+    # logger.info(f"Aggregation abgeschlossen: {processed} Bilder, Vektor-Länge: {vec_len}, Queries: {queries_to_compute}")
     
-    # DataFrame erstellen
-    if compute_all_queries:
-        # Decoder-Modus: Eine Zeile pro Query (analog zu Encoder: eine Zeile pro Feature)
-        # Jede Query hat einen aggregierten Relevanzwert (Summe über alle Dimensionen)
-        
-        relevance_values = []
-        for q in range(queries_to_compute):
-            if agg_attr_per_query[q] is not None:
-                # Summiere die Relevanz über alle Dimensionen für diese Query
-                rel_sum = agg_attr_per_query[q].sum().item()
-            else:
-                rel_sum = 0.0
-            relevance_values.append(rel_sum)
-        
-        relevance_np = np.array(relevance_values)
-        
-        # Normalisierte Relevanzverteilung berechnen (auf Summe der Absolutwerte normiert)
-        abs_sum = np.abs(relevance_np).sum()
-        if abs_sum > 1e-12:
-            normalized_relevance = relevance_np / abs_sum
-        else:
-            normalized_relevance = relevance_np
-        
-        # DataFrame im gleichen Format wie Encoder erstellen
-        data_dict = {
-            "prev_feature_idx": list(range(queries_to_compute)),  # Query-Index als prev_feature_idx
-            "relevance": relevance_np.tolist(),
-            "normalized_relevance": normalized_relevance.tolist(),
-            "layer_index": layer_index,
-            "layer_name": chosen_name,
-            "feature_index": feature_index,
-            "epsilon": lrp_epsilon,
-            "module_role": layer_role,
-            "target_norm": target_norm,
-            "index_kind": index_kind,
-            "index_axis": index_axis,
-            "method": method,
-            "num_images": processed,
-        }
-        
-        df = pd.DataFrame(data_dict)
-        
-        # Nach normalisierter Relevanz absteigend sortieren (wie beim Encoder)
-        df = df.sort_values(by="normalized_relevance", ascending=False).reset_index(drop=True)
-        
+    # DataFrame erstellen - einheitliches Format für Encoder und Decoder
+    # prev_feature_idx zeigt die Relevanz der vorherigen Features/Queries
+    agg_attr = agg_attr_per_query[0]
+    relevance_np = agg_attr.detach().cpu().numpy()
+    
+    # Normalisierte Relevanzverteilung berechnen
+    abs_sum = np.abs(relevance_np).sum()
+    if abs_sum > 1e-12:
+        normalized_relevance = relevance_np / abs_sum
     else:
-        # Encoder-Modus: Original-Format (eine Query)
-        agg_attr = agg_attr_per_query[0]
-        relevance_np = agg_attr.detach().cpu().numpy()
-        
-        # Normalisierte Relevanzverteilung berechnen
-        abs_sum = np.abs(relevance_np).sum()
-        if abs_sum > 1e-12:
-            normalized_relevance = relevance_np / abs_sum
-        else:
-            normalized_relevance = relevance_np
-        
-        data_dict = {
-            "prev_feature_idx": list(range(len(agg_attr))),
-            "relevance": relevance_np.tolist(),
-            "normalized_relevance": normalized_relevance.tolist(),
-            "layer_index": layer_index,
-            "layer_name": chosen_name,
-            "feature_index": feature_index,
-            "epsilon": lrp_epsilon,
-            "module_role": layer_role,
-            "target_norm": target_norm,
-            "index_kind": index_kind,
-            "index_axis": index_axis,
-            "method": method,
-            "num_images": processed,
-        }
-        
-        df = pd.DataFrame(data_dict)
-        
-        # Nach normalisierter Relevanz absteigend sortieren
-        df = df.sort_values(by="normalized_relevance", ascending=False).reset_index(drop=True)
+        normalized_relevance = relevance_np
+    
+    data_dict = {
+        "prev_feature_idx": list(range(len(agg_attr))),
+        "relevance": relevance_np.tolist(),
+        "normalized_relevance": normalized_relevance.tolist(),
+        "layer_index": layer_index,
+        "layer_name": chosen_name,
+        "feature_index": feature_index,
+        "epsilon": lrp_epsilon,
+        "module_role": layer_role,
+        "target_norm": target_norm,
+        "index_kind": index_kind,
+        "index_axis": index_axis,
+        "method": method,
+        "num_images": processed,
+    }
+    
+    df = pd.DataFrame(data_dict)
+    
+    # Nach normalisierter Relevanz absteigend sortieren
+    df = df.sort_values(by="normalized_relevance", ascending=False).reset_index(drop=True)
     
     # CSV speichern
     os.makedirs(os.path.dirname(output_csv) or ".", exist_ok=True)
     df.to_csv(output_csv, index=False)
-    logger.info(f"Ergebnisse gespeichert: {output_csv}")
+    # logger.info(f"Ergebnisse gespeichert: {output_csv}")
     
     return df
 
@@ -517,6 +512,7 @@ def main(
     weights_path: Optional[str] = None,
     verbose: bool = True,
     num_queries: int = 300,
+    use_model_cache: bool = True,
 ) -> pd.DataFrame:
     """Programmierbarer Einstiegspunkt für LRP-Analyse.
     
@@ -526,6 +522,7 @@ def main(
     - `layer_index` ist 1-basiert (intuitiver für Nutzer).
     - Gibt einen DataFrame mit den Ergebnissen zurück.
     - Für Decoder (which_module='decoder'): Berechnet Relevanz für alle `num_queries` Queries.
+    - `use_model_cache=True` beschleunigt wiederholte Aufrufe (Modell wird nur einmal geladen).
     
     Args:
         images_dir: Pfad zum Bildordner.
@@ -539,6 +536,7 @@ def main(
         weights_path: Optionaler Pfad zu Modellgewichten.
         verbose: Ausführliches Logging.
         num_queries: Anzahl der Decoder-Queries (Standard: 300 für MaskDINO).
+        use_model_cache: Modell cachen für schnellere wiederholte Aufrufe.
         
     Returns:
         DataFrame mit Relevanzwerten.
@@ -557,6 +555,7 @@ def main(
         weights_path=weights_path,
         verbose=verbose,
         num_queries=num_queries,
+        use_model_cache=use_model_cache,
     )
 
 

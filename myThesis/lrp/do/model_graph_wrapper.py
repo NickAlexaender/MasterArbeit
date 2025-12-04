@@ -397,30 +397,51 @@ class ModelGraph:
         else:
             yield from reversed(self._by_type[layer_type])
     
-    def get_lrp_propagation_order(self) -> List[Tuple[str, nn.Module]]:
+    def get_lrp_propagation_order(
+        self,
+        which_module: str = "all",
+    ) -> List[Tuple[str, nn.Module]]:
         """Gibt die geordnete Liste von LRP-fähigen Modulen für Rückpropagation.
         
         Dies ist die Hauptmethode für LRP-Analyse: Sie liefert die Module
         in der korrekten Reihenfolge für die Relevanz-Rückpropagation.
         
         Reihenfolge (rückwärts):
-        1. Decoder (von letztem zu erstem Layer)
-        2. Encoder (von letztem zu erstem Layer)
+        1. Decoder (von letztem zu erstem Layer) - nur wenn which_module="decoder" oder "all"
+        2. Encoder (von letztem zu erstem Layer) - nur wenn which_module="encoder" oder "all"
         3. Pixel Decoder
         4. Backbone
+        
+        Args:
+            which_module: "all", "encoder" oder "decoder"
+                - "all": Vollständige Propagation durch alle Module
+                - "encoder": Nur Encoder + Pixel Decoder + Backbone (kein Decoder)
+                - "decoder": Nur Decoder-Module
         
         Returns:
             Liste von (name, module) Tupeln in LRP-Rückpropagations-Reihenfolge
         """
         result: List[Tuple[str, nn.Module]] = []
         
-        # Reihenfolge für LRP: Decoder -> Encoder -> Pixel Decoder -> Backbone
-        order = [
-            LayerType.DECODER,
-            LayerType.ENCODER,
-            LayerType.PIXEL_DECODER,
-            LayerType.BACKBONE,
-        ]
+        # Reihenfolge basierend auf which_module
+        if which_module == "decoder":
+            # Nur Decoder
+            order = [LayerType.DECODER]
+        elif which_module == "encoder":
+            # Nur Encoder + Pixel Decoder + Backbone (KEIN Decoder)
+            order = [
+                LayerType.ENCODER,
+                LayerType.PIXEL_DECODER,
+                LayerType.BACKBONE,
+            ]
+        else:
+            # Alle Module
+            order = [
+                LayerType.DECODER,
+                LayerType.ENCODER,
+                LayerType.PIXEL_DECODER,
+                LayerType.BACKBONE,
+            ]
         
         for layer_type in order:
             for node in reversed(self._by_type[layer_type]):

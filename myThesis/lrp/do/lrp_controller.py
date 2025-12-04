@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import gc
 import logging
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -119,8 +119,9 @@ class LRPController:
         self.attn_qk_share = ATTN_QK_SHARE
         self.sign_preserving = SIGN_PRESERVING
         
+        # verbose=True -> INFO Level (nicht DEBUG, da zu viele Logs)
         if verbose:
-            logger.setLevel(logging.DEBUG)
+            logger.setLevel(logging.INFO)
     
     def _register_decoder_hook(self) -> None:
         """Registriert einen Hook auf dem Decoder, um Raw-Outputs abzufangen.
@@ -159,8 +160,8 @@ class LRPController:
                         logger.debug(f"Decoder-Raw-Outputs gespeichert: {list(self._decoder_raw_outputs.keys())}")
         
         self._decoder_hook_handle = decoder_module.register_forward_hook(hook_fn)
-        if self.verbose:
-            logger.info("Decoder-Hook registriert auf sem_seg_head")
+        # if self.verbose:
+        #     logger.info("Decoder-Hook registriert auf sem_seg_head")
         
     # =========================================================================
     # Vorbereitung
@@ -213,9 +214,9 @@ class LRPController:
         
         self._prepared = True
         
-        if self.verbose:
-            logger.info(f"LRP-Vorbereitung abgeschlossen: {stats}")
-            logger.info(f"Graph enthält {len(self._graph)} Layer")
+        # if self.verbose:
+        #     logger.info(f"LRP-Vorbereitung abgeschlossen: {stats}")
+        #     logger.info(f"Graph enthält {len(self._graph)} Layer")
         
         return stats
     
@@ -253,7 +254,10 @@ class LRPController:
         self._decoder_raw_outputs = None
         
         try:
-            with torch.inference_mode():
+            # WICHTIG: Nicht inference_mode() verwenden, da sonst detach() nicht
+            # korrekt funktioniert und Aktivierungen nicht gespeichert werden können.
+            # Stattdessen no_grad() verwenden, das Tensor-Operationen erlaubt.
+            with torch.no_grad():
                 outputs = self.model(inputs)
         finally:
             # LRP-Modus bleibt aktiv für Backward Pass
@@ -269,6 +273,10 @@ class LRPController:
         self,
         R_start: Tensor,
         target_layer: Optional[str] = None,
+        which_module: str = "all",
+        stop_after_cross_attn: bool = True,
+        clear_activations: bool = True,
+        start_layer_index: Optional[int] = None,
     ) -> LRPResult:
         """Führt den LRP Backward Pass durch.
         
@@ -278,6 +286,17 @@ class LRPController:
         Args:
             R_start: Start-Relevanz (typisch auf Decoder-Output)
             target_layer: Optional - stoppe bei diesem Layer
+            which_module: "all", "encoder" oder "decoder" - bestimmt welche
+                Module in der Propagation berücksichtigt werden
+            stop_after_cross_attn: Bei Decoder-LRP: Stoppe nach dem ersten 
+                cross_attn Layer (Standard: True). Nach cross_attn wechselt
+                die Relevanz von Query-Space (300) zu Encoder-Token-Space (13125).
+            clear_activations: Aktivierungen nach Propagation löschen (Standard: True).
+                Setze auf False wenn mehrere Backward-Passes auf den gleichen
+                Aktivierungen laufen sollen (z.B. bei run_all_queries).
+            start_layer_index: Optional - 0-basierter Index des Start-Layers in der
+                Propagationsreihenfolge. Überspringe Layer vor diesem Index.
+                Wird für Layer-zu-Layer LRP verwendet.
             
         Returns:
             LRPResult mit Relevanz-Maps und Metadaten
@@ -285,18 +304,49 @@ class LRPController:
         result = LRPResult()
         R_current = R_start.clone()
         
-        # Hole die Layer-Liste in LRP-Propagations-Reihenfolge
-        # (Decoder -> Encoder -> Pixel Decoder -> Backbone)
-        propagation_order = self.graph.get_lrp_propagation_order()
+        # Memory-Bereinigung vor Backward Pass
+        gc.collect()
         
-        if self.verbose:
-            logger.info(f"Starte Backward Pass mit {len(propagation_order)} Layern")
+        # Hole die Layer-Liste in LRP-Propagations-Reihenfolge
+        # basierend auf which_module
+        propagation_order = self.graph.get_lrp_propagation_order(which_module=which_module)
+        
+        # HINWEIS: Bei Layer-zu-Layer LRP (start_layer_index angegeben):
+        # - Die Relevanz wurde bereits auf dem OUTPUT des Start-Layers initialisiert
+        # - Wir propagieren durch ALLE Layer (nicht nur ab start_layer_index)
+        # - Das ist korrekt, weil wir die Verteilung auf die EINGABE-Features sehen wollen
+        # 
+        # Frühere Logik (start_layer_index zum Überspringen) war falsch:
+        # Sie übersprang Layer, die eigentlich für die Propagation nötig sind.
+        #
+        # Beispiel: Wenn wir bei layers.0.self_attn starten:
+        # - Alte Logik: Überspringe alle Layer und propagiere nur durch layers.0 -> keine Verteilung!
+        # - Neue Logik: Propagiere durch ALLE Layer -> korrekte Verteilung
+        if start_layer_index is not None and self.verbose:
+            logger.debug(f"Layer-zu-Layer LRP: Start-Layer-Index {start_layer_index}, "
+                        f"propagiere durch alle {len(propagation_order)} Layer")
+        
+        # if self.verbose:
+        #     logger.info(f"Starte Backward Pass mit {len(propagation_order)} Layern (which_module={which_module})")
         
         for layer_name, module in propagation_order:
+            # Progress-Logging
+            logger.debug(f"Propagiere Layer: {layer_name} (R_current.shape={R_current.shape})")
+            
+            # Bei Decoder-LRP: Cross-Attention Layer ÜBERSPRINGEN, da sie die Shape
+            # von Query-Space (300) zu Encoder-Token-Space (13125) transformieren würden.
+            # Für Layer-zu-Layer LRP im Decoder wollen wir im Query-Space bleiben!
+            # Wir propagieren nur durch Self-Attention und LayerNorm Layer.
+            if stop_after_cross_attn and which_module == "decoder":
+                if "cross_attn" in layer_name and "decoder" in layer_name:
+                    if self.verbose:
+                        logger.debug(f"Überspringe cross_attn {layer_name} - bleibe im Query-Space (300)")
+                    continue  # Überspringe diesen Layer, aber propagiere weiter durch andere
+            
             # Stoppe bei Ziel-Layer falls angegeben
             if target_layer and layer_name == target_layer:
-                if self.verbose:
-                    logger.info(f"Erreiche Ziel-Layer: {layer_name}")
+                # if self.verbose:
+                #     logger.info(f"Erreiche Ziel-Layer: {layer_name}")
                 break
             
             # Hole Layer-Node für Metadaten
@@ -312,20 +362,36 @@ class LRPController:
                     R_out=R_current,
                 )
                 
+                # MEMORY: Aktivierungen dieses Layers nur löschen wenn gewünscht
+                # Bei run_all_queries brauchen wir die Aktivierungen für alle Queries
+                if clear_activations and hasattr(module, 'activations') and module.activations is not None:
+                    module.activations.clear()
+                
                 # Konservierungsprüfung
                 conservation_error = self._check_conservation(R_current, R_prev)
                 result.conservation_errors.append(conservation_error)
                 
-                if abs(conservation_error) > 0.01 and self.verbose:
-                    logger.warning(
-                        f"Konservierungsfehler bei {layer_name}: {conservation_error:.4f}"
-                    )
+                # Konservierungsfehler nicht mehr loggen (zu verbose)
+                # if abs(conservation_error) > 0.01 and self.verbose:
+                #     logger.warning(
+                #         f"Konservierungsfehler bei {layer_name}: {conservation_error:.4f}"
+                #     )
                 
-                # Speichere Relevanz für diesen Layer
+                # MEMORY OPTIMIZATION: Speichere nur die letzten paar Layer-Relevanzen
+                # statt alle, um OOM zu vermeiden
+                if len(result.R_per_layer) > 3:
+                    # Entferne älteste Einträge
+                    oldest_key = next(iter(result.R_per_layer))
+                    del result.R_per_layer[oldest_key]
+                
                 result.R_per_layer[layer_name] = R_prev.clone()
                 
                 # Update für nächste Iteration
                 R_current = R_prev
+                
+                # Aggressives Memory-Cleanup
+                del R_prev
+                gc.collect()
                 
             except Exception as e:
                 logger.error(f"Fehler bei Layer {layer_name}: {e}")
@@ -412,7 +478,7 @@ class LRPController:
     # Hilfsmethoden
     # =========================================================================
     
-    def _check_conservation(self, R_out: Tensor, R_in: Tensor) -> float:
+    def _check_conservation(self, R_out: Tensor, R_in: Optional[Tensor]) -> float:
         """Prüft die Relevanz-Konservierung.
         
         LRP sollte idealerweise konservativ sein: sum(R_in) ≈ sum(R_out)
@@ -420,6 +486,15 @@ class LRPController:
         Returns:
             Relativer Konservierungsfehler
         """
+        # Robuster Check für None
+        if R_in is None:
+            logger.warning("R_in ist None - überspringe Konservierungsprüfung")
+            return 0.0
+        
+        if R_out is None:
+            logger.warning("R_out ist None - überspringe Konservierungsprüfung")
+            return 0.0
+        
         sum_out = R_out.sum().item()
         sum_in = R_in.sum().item()
         
@@ -428,14 +503,19 @@ class LRPController:
         
         return (sum_in - sum_out) / abs(sum_out)
     
-    def cleanup(self):
-        """Bereinigt Aktivierungen und setzt LRP-Modus zurück."""
+    def cleanup(self, run_gc: bool = False):
+        """Bereinigt Aktivierungen und setzt LRP-Modus zurück.
+        
+        Args:
+            run_gc: Wenn True, wird gc.collect() aufgerufen (teuer, aber spart RAM)
+        """
         set_lrp_mode(self.model, enabled=False)
         clear_all_activations(self.model)
-        gc.collect()
         
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if run_gc:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
     # =========================================================================
     # High-Level API
@@ -447,14 +527,27 @@ class LRPController:
         target_class: Optional[int] = None,
         target_query: int = 0,
         normalize: str = "sum1",
+        which_module: str = "all",
+        target_feature: Optional[int] = None,
+        target_layer_index: Optional[int] = None,
+        target_layer_name: Optional[str] = None,
     ) -> LRPResult:
         """Führt vollständige LRP-Analyse durch.
         
         Args:
             inputs: Eingabe-Tensor oder Detectron2-Batch
             target_class: Zielklasse für Attribution (optional)
-            target_query: Ziel-Query-Index (bei Object Detection)
+            target_query: Ziel-Query-Index (bei Object Detection / Decoder-LRP)
             normalize: Normalisierungsmethode ("sum1", "sumAbs1", "none")
+            which_module: "all", "encoder" oder "decoder" - bestimmt welche
+                Module in der Propagation berücksichtigt werden
+            target_feature: Für Encoder-Modus - Kanal-Index für Start-Relevanz.
+                Für Decoder-Modus - Query-Index (gleich wie target_query).
+            target_layer_index: Für Layer-zu-Layer LRP - 0-basierter Index des
+                Start-Layers (in Propagationsreihenfolge). Wenn None, startet
+                die Propagation am letzten Layer des jeweiligen Moduls.
+            target_layer_name: Für Layer-zu-Layer LRP - Name des Ziel-Layers.
+                Wenn angegeben, hat dies Priorität über target_layer_index.
             
         Returns:
             LRPResult mit Relevanz-Maps
@@ -466,21 +559,43 @@ class LRPController:
             # Forward Pass
             outputs = self.forward_pass(inputs)
             
-            # Start-Relevanz erstellen
-            # Für MaskDINO: Decoder-Ausgabe für target_query
-            # TODO: Anpassen je nach Modellarchitektur
-            decoder_output = self._get_decoder_output(outputs, target_query)
+            # Start-Relevanz erstellen basierend auf which_module
+            if which_module == "encoder":
+                # Für Encoder-LRP: Verwende Output des spezifizierten Encoder-Layers
+                R_start, prop_start_index = self._get_encoder_start_relevance(
+                    feature_index=target_feature if target_feature is not None else 0,
+                    normalize=normalize,
+                    target_layer_index=target_layer_index,
+                    target_layer_name=target_layer_name,
+                )
+            elif which_module == "decoder" and target_layer_name is not None:
+                # NEU: Für Decoder Layer-zu-Layer LRP: Verwende Output des spezifizierten Decoder-Layers
+                R_start, prop_start_index = self._get_decoder_start_relevance(
+                    query_index=target_query,
+                    normalize=normalize,
+                    target_layer_name=target_layer_name,
+                )
+            else:
+                # Für Decoder-LRP oder "all": Verwende Decoder-Output (alte Logik)
+                decoder_output = self._get_decoder_output(outputs, target_query)
+                prop_start_index = None  # Nicht verwendet für Decoder
+                
+                R_start = build_target_relevance(
+                    layer_output=decoder_output,
+                    feature_index=target_class if target_class is not None else 0,
+                    token_reduce="mean",
+                    target_norm=normalize,
+                    index_axis="channel" if target_class is not None else "token",
+                )
             
-            R_start = build_target_relevance(
-                layer_output=decoder_output,
-                feature_index=target_class if target_class is not None else 0,
-                token_reduce="mean",
-                target_norm=normalize,
-                index_axis="channel" if target_class is not None else "token",
+            # Backward Pass - mit which_module Parameter
+            # Bei Layer-zu-Layer LRP starten wir am prop_start_index
+            # Die Propagation läuft durch alle Layer darunter
+            result = self.backward_pass(
+                R_start, 
+                which_module=which_module,
+                start_layer_index=prop_start_index if (which_module == "encoder" or (which_module == "decoder" and target_layer_name)) else None,
             )
-            
-            # Backward Pass
-            result = self.backward_pass(R_start)
             
             # Normalisierung
             if result.R_input is not None and normalize != "none":
@@ -500,6 +615,8 @@ class LRPController:
         num_queries: int = 300,
         target_class: Optional[int] = None,
         normalize: str = "sum1",
+        which_module: str = "decoder",
+        gc_interval: int = 300,
     ) -> List[LRPResult]:
         """Führt LRP-Analyse für alle Queries auf einmal durch.
         
@@ -515,6 +632,8 @@ class LRPController:
             num_queries: Anzahl der Queries (Standard: 300 für MaskDINO)
             target_class: Zielklasse für Attribution (optional)
             normalize: Normalisierungsmethode ("sum1", "sumAbs1", "none")
+            which_module: "decoder" oder "all" - bestimmt welche Module propagiert werden
+            gc_interval: Garbage Collection alle N Queries (höher = schneller, mehr RAM)
             
         Returns:
             Liste von LRPResult, eine pro Query
@@ -537,23 +656,40 @@ class LRPController:
                     decoder_output = self._get_decoder_output(outputs, query_idx)
                     # decoder_output hat Shape (B, 1, hidden_dim) = (1, 1, 256)
                     
-                    # WICHTIG: Erstelle R_start direkt aus den Decoder-Outputs
-                    # Die Relevanz soll proportional zu den tatsächlichen Werten sein,
-                    # nicht eine gleichmäßige Verteilung!
-                    R_start = decoder_output.clone()
+                    # WICHTIG: Für Decoder-LRP müssen wir R_start auf alle 300 Queries expandieren,
+                    # da die Self-Attention alle Queries gleichzeitig verarbeitet.
+                    # Nur die Ziel-Query erhält Relevanz, alle anderen = 0.
+                    num_total_queries = 300  # MaskDINO verwendet immer 300 Queries
+                    B, _, C = decoder_output.shape
+                    
+                    # Die Decoder-Aktivierungen sind im Format (T, B, C) = (300, 1, 256)
+                    # (siehe debug_shapes.py Analyse: norm1, norm2, norm3 haben diese Shape)
+                    # Daher muss R_start auch dieses Format haben!
+                    R_start_full = torch.zeros((num_total_queries, B, C), 
+                                               device=decoder_output.device, 
+                                               dtype=decoder_output.dtype)
+                    
+                    # Setze Relevanz nur für die Ziel-Query an Position [query_idx, 0, :]
+                    # decoder_output hat Shape (B, 1, C) = (1, 1, 256) -> squeeze und setze
+                    R_start_full[query_idx, 0, :] = decoder_output.squeeze()
                     
                     # Normalisiere R_start auf Summe 1 (wichtig für LRP-Konservierung)
                     if normalize == "sum1":
-                        R_start = R_start / (R_start.abs().sum() + 1e-12)
+                        R_start_full = R_start_full / (R_start_full.abs().sum() + 1e-12)
                     elif normalize == "sumAbs1":
-                        R_start = R_start / (R_start.abs().sum() + 1e-12)
+                        R_start_full = R_start_full / (R_start_full.abs().sum() + 1e-12)
                     # Bei "none" keine Normalisierung
                     
                     if self.verbose and query_idx < 3:
-                        logger.debug(f"Query {query_idx}: R_start sum={R_start.sum().item():.6f}, shape={R_start.shape}")
+                        logger.debug(f"Query {query_idx}: R_start sum={R_start_full.sum().item():.6f}, shape={R_start_full.shape}")
                     
-                    # Backward Pass
-                    result = self.backward_pass(R_start)
+                    # Backward Pass - mit which_module Parameter für Decoder-only Propagation
+                    # WICHTIG: clear_activations=False damit Aktivierungen für alle Queries erhalten bleiben
+                    result = self.backward_pass(
+                        R_start_full, 
+                        which_module=which_module,
+                        clear_activations=False,  # Aktivierungen für folgende Queries erhalten
+                    )
                     
                     # Nachträgliche Normalisierung des Ergebnisses
                     if result.R_input is not None and normalize != "none":
@@ -569,20 +705,331 @@ class LRPController:
                         minimal_result.R_input = result.R_input.detach().cpu().clone()
                     results.append(minimal_result)
                     
-                    # Speicher freigeben nach jeder Query
-                    del result, R_start, decoder_output
-                    gc.collect()  # Aggressives GC nach jeder Query
+                    # Speicher freigeben - nur alle gc_interval Queries
+                    del result, R_start_full, decoder_output
+                    if (query_idx + 1) % gc_interval == 0:
+                        gc.collect()
                     
                 except Exception as e:
                     logger.warning(f"Fehler bei Query {query_idx}: {e}")
                     results.append(LRPResult())  # Leeres Ergebnis
-                    gc.collect()
             
             return results
             
         finally:
             self.cleanup()
             gc.collect()
+    
+    def _get_encoder_start_relevance(
+        self,
+        feature_index: int = 0,
+        normalize: str = "sum1",
+        target_layer_index: Optional[int] = None,
+        target_layer_name: Optional[str] = None,
+    ) -> Tuple[Tensor, int]:
+        """Erstellt Start-Relevanz für Encoder-LRP basierend auf einem spezifischen Encoder-Layer-Output.
+        
+        Für Encoder-LRP beginnen wir mit dem Output des angegebenen Encoder-Layers.
+        Die Relevanz wird NUR auf den angegebenen Feature-Kanal initialisiert.
+        
+        WICHTIG: Für Layer-zu-Layer LRP muss target_layer_name oder target_layer_index den Layer angeben,
+        von dem aus wir die Relevanz zurückpropagieren wollen.
+        
+        Args:
+            feature_index: Kanal-Index für den die Relevanz gesetzt wird
+            normalize: Normalisierungsmethode
+            target_layer_index: 0-basierter Index des Encoder-Layers (in Propagationsreihenfolge).
+                               Wenn None, wird der letzte (erste in der Reihenfolge) verwendet.
+            target_layer_name: Name des Ziel-Layers. Wenn angegeben, hat dies Priorität über target_layer_index.
+            
+        Returns:
+            Tuple aus:
+            - R_start Tensor mit Shape (num_tokens, batch, hidden_dim) - passend für Encoder-Format
+            - prop_start_index: Der Index in der Propagationsreihenfolge, ab dem propagiert werden soll
+        """
+        # Hole alle Encoder-Layer in Propagationsreihenfolge (rückwärts = letzter zuerst)
+        encoder_layers = self.graph.get_lrp_propagation_order(which_module="encoder")
+        if not encoder_layers:
+            raise RuntimeError("Keine Encoder-Layer gefunden")
+        
+        # Wähle den richtigen Layer
+        prop_start_index = 0  # Standard: ab dem ersten Layer in der Propagationsreihenfolge
+        target_module = None
+        target_name = None
+        
+        if target_layer_name is not None:
+            # Suche Layer nach Name
+            for idx, (name, module) in enumerate(encoder_layers):
+                if name == target_layer_name or target_layer_name in name:
+                    target_name = name
+                    target_module = module
+                    prop_start_index = idx
+                    break
+            if target_module is None:
+                raise ValueError(
+                    f"Layer '{target_layer_name}' nicht in Propagationsreihenfolge gefunden. "
+                    f"Verfügbare Layer: {[n for n, _ in encoder_layers[:10]]}..."
+                )
+        elif target_layer_index is not None:
+            if target_layer_index < 0 or target_layer_index >= len(encoder_layers):
+                raise IndexError(
+                    f"target_layer_index {target_layer_index} außerhalb [0, {len(encoder_layers)-1}]"
+                )
+            target_name, target_module = encoder_layers[target_layer_index]
+            prop_start_index = target_layer_index
+        else:
+            # Default: letzter Encoder-Layer (erster in der Propagationsreihenfolge)
+            target_name, target_module = encoder_layers[0]
+            prop_start_index = 0
+        
+        if self.verbose:
+            logger.debug(f"Verwende Output von {target_name} als Encoder-Start (Prop-Index: {prop_start_index})")
+        
+        # Hole die gespeicherten Aktivierungen
+        if not hasattr(target_module, 'activations') or target_module.activations is None:
+            raise RuntimeError(f"Keine Aktivierungen für {target_name} gespeichert")
+        
+        activations = target_module.activations
+        if activations.output is None:
+            raise RuntimeError(f"Kein Output für {target_name} gespeichert")
+        
+        # Output hat typisch Shape (num_tokens, batch, hidden_dim) = (T, B, C)
+        encoder_output = activations.output.clone()
+        
+        if self.verbose:
+            logger.debug(f"Encoder-Output Shape: {encoder_output.shape}")
+        
+        # WICHTIG: Behalte das ursprüngliche Format (T, B, C) für die Propagation bei!
+        # Die LRP-Propagation erwartet dieses Format.
+        
+        # Erstelle Start-Relevanz im gleichen Format wie encoder_output
+        R_start = torch.zeros_like(encoder_output)
+        
+        # Setze Relevanz NUR auf den spezifizierten Feature-Index
+        # encoder_output hat Shape (T, B, C) oder (B, T, C)
+        if encoder_output.dim() == 3:
+            # Erkenne Format anhand der Batch-Dimension (normalerweise = 1)
+            if encoder_output.shape[1] == 1:
+                # Format ist (T, B, C) - typisch für Encoder
+                # Setze Relevanz für alle Tokens, aber nur für feature_index
+                R_start[:, :, feature_index] = encoder_output[:, :, feature_index].abs()
+            else:
+                # Format könnte (B, T, C) sein
+                R_start[:, :, feature_index] = encoder_output[:, :, feature_index].abs()
+        elif encoder_output.dim() == 2:
+            # (T, C) -> behandle wie (T, 1, C)
+            R_start[:, feature_index] = encoder_output[:, feature_index].abs()
+        
+        # Normalisieren
+        if normalize == "sum1":
+            total = R_start.sum()
+            if total > 1e-12:
+                R_start = R_start / total
+        elif normalize == "sumAbs1":
+            total = R_start.abs().sum()
+            if total > 1e-12:
+                R_start = R_start / total
+        
+        if self.verbose:
+            logger.debug(f"Encoder R_start Shape: {R_start.shape}, Sum: {R_start.sum().item():.6f}")
+            # Debug: Zeige welche Kanäle Relevanz haben
+            if R_start.dim() == 3:
+                channel_sums = R_start.sum(dim=(0, 1))
+                non_zero = (channel_sums > 1e-12).sum().item()
+                logger.debug(f"Anzahl Kanäle mit Relevanz: {non_zero} (sollte 1 sein für feature_index={feature_index})")
+        
+        return R_start, prop_start_index
+    
+    def _get_decoder_start_relevance(
+        self,
+        query_index: int = 0,
+        normalize: str = "sum1",
+        target_layer_name: Optional[str] = None,
+    ) -> Tuple[Tensor, int]:
+        """Erstellt Start-Relevanz für Decoder Layer-zu-Layer LRP.
+        
+        Analog zu _get_encoder_start_relevance, aber für Decoder-Layer.
+        Die Relevanz wird NUR auf die angegebene Query initialisiert.
+        
+        Args:
+            query_index: Query-Index für den die Relevanz gesetzt wird (0-299)
+            normalize: Normalisierungsmethode
+            target_layer_name: Name des Ziel-Decoder-Layers
+            
+        Returns:
+            Tuple aus:
+            - R_start Tensor mit Shape (num_queries, batch, hidden_dim) - passend für Decoder-Format
+            - prop_start_index: Der Index in der Propagationsreihenfolge, ab dem propagiert werden soll
+        """
+        # Hole alle Decoder-Layer in Propagationsreihenfolge (rückwärts = letzter zuerst)
+        decoder_layers = self.graph.get_lrp_propagation_order(which_module="decoder")
+        if not decoder_layers:
+            raise RuntimeError("Keine Decoder-Layer gefunden")
+        
+        num_queries_expected = 300  # MaskDINO Standard
+        
+        # Wähle den richtigen Layer
+        prop_start_index = 0  # Standard: ab dem ersten Layer in der Propagationsreihenfolge
+        target_module = None
+        target_name = None
+        
+        if target_layer_name is not None:
+            # Suche Layer nach Name
+            for idx, (name, module) in enumerate(decoder_layers):
+                if name == target_layer_name or target_layer_name in name:
+                    target_name = name
+                    target_module = module
+                    prop_start_index = idx
+                    break
+            if target_module is None:
+                raise ValueError(
+                    f"Layer '{target_layer_name}' nicht in Decoder-Propagationsreihenfolge gefunden. "
+                    f"Verfügbare Layer: {[n for n, _ in decoder_layers[:10]]}..."
+                )
+        else:
+            # Default: letzter Decoder-Layer (erster in der Propagationsreihenfolge)
+            target_name, target_module = decoder_layers[0]
+            prop_start_index = 0
+        
+        if self.verbose:
+            logger.debug(f"Verwende Output von {target_name} als Decoder-Start (Prop-Index: {prop_start_index})")
+        
+        # Versuche Aktivierungen vom Ziel-Layer zu holen
+        # Falls das nicht klappt (falsche Shape), suche nach einem passenden Layer
+        decoder_output = None
+        actual_layer_name = target_name
+        actual_prop_index = prop_start_index
+        
+        # Strategie: Probiere erst den Ziel-Layer, dann suche nach alternativen
+        layers_to_try = [(target_name, target_module, prop_start_index)]
+        
+        # Füge weitere Layer hinzu, die im gleichen Block liegen
+        # (z.B. wenn target ist "layers.0.norm1", probiere auch "layers.0.self_attn")
+        target_block = '.'.join(target_layer_name.split('.')[:-1]) if target_layer_name else ""
+        for idx, (name, module) in enumerate(decoder_layers):
+            if name != target_name and target_block and target_block in name:
+                layers_to_try.append((name, module, idx))
+        
+        for try_name, try_module, try_idx in layers_to_try:
+            if not hasattr(try_module, 'activations') or try_module.activations is None:
+                continue
+            
+            activations = try_module.activations
+            if activations.output is None:
+                continue
+            
+            output = activations.output.clone()
+            
+            # Prüfe ob die Shape passt
+            if output.dim() == 3:
+                if output.shape[0] == num_queries_expected:
+                    # Format (Q, B, C) - perfekt!
+                    decoder_output = output
+                    actual_layer_name = try_name
+                    actual_prop_index = try_idx
+                    break
+                elif output.shape[1] == num_queries_expected:
+                    # Format (B, Q, C) - transponiere
+                    decoder_output = output.permute(1, 0, 2)
+                    actual_layer_name = try_name
+                    actual_prop_index = try_idx
+                    break
+            
+            # Versuche auch die Input-Aktivierung
+            if activations.input is not None:
+                inp = activations.input
+                if inp.dim() == 3:
+                    if inp.shape[0] == num_queries_expected:
+                        decoder_output = inp.clone()
+                        actual_layer_name = try_name
+                        actual_prop_index = try_idx
+                        if self.verbose:
+                            logger.debug(f"Verwende Input statt Output von {try_name}")
+                        break
+                    elif inp.shape[1] == num_queries_expected:
+                        decoder_output = inp.permute(1, 0, 2).clone()
+                        actual_layer_name = try_name
+                        actual_prop_index = try_idx
+                        break
+        
+        if decoder_output is None:
+            # Letzte Möglichkeit: Suche JEDEN Decoder-Layer mit passender Shape
+            for idx, (name, module) in enumerate(decoder_layers):
+                if not hasattr(module, 'activations') or module.activations is None:
+                    continue
+                activations = module.activations
+                for act_name, act in [('output', activations.output), ('input', activations.input)]:
+                    if act is None:
+                        continue
+                    if act.dim() == 3 and act.shape[0] == num_queries_expected:
+                        decoder_output = act.clone()
+                        actual_layer_name = name
+                        actual_prop_index = idx
+                        logger.warning(f"Fallback: Verwende {act_name} von {name} (Shape: {act.shape})")
+                        break
+                    elif act.dim() == 3 and act.shape[1] == num_queries_expected:
+                        decoder_output = act.permute(1, 0, 2).clone()
+                        actual_layer_name = name
+                        actual_prop_index = idx
+                        logger.warning(f"Fallback: Verwende transponiertes {act_name} von {name}")
+                        break
+                if decoder_output is not None:
+                    break
+        
+        if decoder_output is None:
+            # Debug: Zeige alle verfügbaren Shapes
+            shapes_info = []
+            for name, module in decoder_layers[:10]:
+                if hasattr(module, 'activations') and module.activations is not None:
+                    acts = module.activations
+                    out_shape = tuple(acts.output.shape) if acts.output is not None else None
+                    inp_shape = tuple(acts.input.shape) if acts.input is not None else None
+                    shapes_info.append(f"{name}: out={out_shape}, in={inp_shape}")
+            raise RuntimeError(
+                f"Kein Decoder-Layer mit Query-Dimension {num_queries_expected} gefunden.\n"
+                f"Verfügbare Layer und Shapes:\n" + "\n".join(shapes_info)
+            )
+        
+        if self.verbose:
+            logger.debug(f"Decoder-Output von {actual_layer_name}, Shape: {decoder_output.shape}")
+        
+        # Erstelle Start-Relevanz im gleichen Format wie decoder_output
+        # Nur die angegebene Query erhält Relevanz, alle anderen = 0
+        R_start = torch.zeros_like(decoder_output)
+        
+        # Decoder-Output hat Shape (Q, B, C) = (300, 1, 256)
+        if decoder_output.dim() == 3:
+            # Validiere query_index
+            num_queries = decoder_output.shape[0]
+            if query_index < 0 or query_index >= num_queries:
+                raise IndexError(f"query_index {query_index} außerhalb [0, {num_queries-1}]")
+            
+            # Setze Relevanz NUR für die spezifizierte Query
+            # Alle hidden_dim Dimensionen dieser Query erhalten die Aktivierungswerte
+            R_start[query_index, :, :] = decoder_output[query_index, :, :].abs()
+        elif decoder_output.dim() == 2:
+            # (Q, C) -> behandle wie (Q, 1, C)
+            R_start[query_index, :] = decoder_output[query_index, :].abs()
+        
+        # Normalisieren
+        if normalize == "sum1":
+            total = R_start.sum()
+            if total > 1e-12:
+                R_start = R_start / total
+        elif normalize == "sumAbs1":
+            total = R_start.abs().sum()
+            if total > 1e-12:
+                R_start = R_start / total
+        
+        if self.verbose:
+            logger.debug(f"Decoder R_start Shape: {R_start.shape}, Sum: {R_start.sum().item():.6f}")
+            # Debug: Zeige welche Queries Relevanz haben
+            if R_start.dim() == 3:
+                query_sums = R_start.sum(dim=(1, 2))
+                non_zero = (query_sums > 1e-12).sum().item()
+                logger.debug(f"Anzahl Queries mit Relevanz: {non_zero} (sollte 1 sein für query_index={query_index})")
+        
+        return R_start, actual_prop_index
     
     def _get_decoder_output(
         self,

@@ -1,3 +1,8 @@
+# Warnungen unterdrücken BEVOR andere Module importiert werden
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
 import os
 
 from myThesis.lrp import calc_lrp
@@ -5,7 +10,9 @@ from myThesis.lrp import calculate_network as netcalc
 
 
 # Eingaben/Wege
-images_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/1images"
+  # 1images hier Maß aller Dinge, aber test_single -> besser für schnellen Test
+  # /Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/1images -> test_single
+images_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/test_single"  # 1 Bild für Decoder-Test
 weights_path = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_final.pth"
 model = "car"
 train_state = "finetune6"
@@ -43,6 +50,8 @@ def _run_single(module_row: "netcalc.TopFeature") -> None:
 		which_module=module,
 		output_csv=out_csv,
 		weights_path=weights_path,
+  # num_queries sollte generell entfernt werden -> besser für schnellen Test
+		# num_queries=10,  # Nur 1 Query für Test (spart Memory bei Decoder)
 	)
 
 
@@ -59,18 +68,33 @@ if __name__ == "__main__":
 		decoder_dir=decoder_dir,
 	)
 
-	# 2) Je einen Kandidaten auswählen
-	enc_row = next((r for r in rows if r.module == "encoder"), None)
-	dec_row = next((r for r in rows if r.module == "decoder"), None)
+	# 2) Je 2 Kandidaten auswählen (Encoder und Decoder)
+	enc_rows = [r for r in rows if r.module == "encoder"][:2]
+	dec_rows = [r for r in rows if r.module == "decoder"][:2]
 
-	# 3) Falls nichts gefunden wurde, mit sinnvollen Defaults weiterrechnen
-	if enc_row is None:
-		print("Kein Encoder-Top-Feature gefunden – verwende Fallback (layer=3, feature=233).")
-		enc_row = netcalc.TopFeature(module="encoder", layer_idx=2, feature_idx=233, miou=0.0)
-	if dec_row is None:
-		print("Kein Decoder-Top-Feature gefunden – verwende Fallback (layer=3, feature=278).")
-		dec_row = netcalc.TopFeature(module="decoder", layer_idx=2, feature_idx=278, miou=0.0)
+	# 3) Falls nicht genug gefunden wurden, mit sinnvollen Defaults auffüllen
+	if len(enc_rows) < 2:
+		print(f"Nur {len(enc_rows)} Encoder-Top-Features gefunden – fülle mit Fallbacks auf.")
+		fallback_enc = [
+			netcalc.TopFeature(module="encoder", layer_idx=2, feature_idx=233, miou=0.0),
+			netcalc.TopFeature(module="encoder", layer_idx=2, feature_idx=100, miou=0.0),
+		]
+		enc_rows.extend(fallback_enc[len(enc_rows):2])
+	if len(dec_rows) < 2:
+		print(f"Nur {len(dec_rows)} Decoder-Top-Features gefunden – fülle mit Fallbacks auf.")
+		fallback_dec = [
+			netcalc.TopFeature(module="decoder", layer_idx=2, feature_idx=278, miou=0.0),
+			netcalc.TopFeature(module="decoder", layer_idx=2, feature_idx=150, miou=0.0),
+		]
+		dec_rows.extend(fallback_dec[len(dec_rows):2])
 
-	# 4) Ausführen
-	_run_single(enc_row)
-	_run_single(dec_row)
+	# 4) Ausführen - 2 Encoder und 2 Decoder
+	print(f"\n=== Starte LRP für {len(enc_rows)} Encoder-Features ===")
+	for i, enc_row in enumerate(enc_rows, 1):
+		print(f"\n--- Encoder {i}/{len(enc_rows)} ---")
+		_run_single(enc_row)
+
+	print(f"\n=== Starte LRP für {len(dec_rows)} Decoder-Features ===")
+	for i, dec_row in enumerate(dec_rows, 1):
+		print(f"\n--- Decoder {i}/{len(dec_rows)} ---")
+		_run_single(dec_row)

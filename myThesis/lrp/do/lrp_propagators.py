@@ -89,6 +89,21 @@ def propagate_msdeformattn(
     W_O = activations.W_O
     value_features = activations.input_flatten
     
+    # WICHTIG: R_out Shape muss zu sampling_locations passen!
+    # sampling_locations hat Shape (B, T, H, L, P, 2)
+    # R_out muss Shape (B, T, C) haben
+    B_loc = sampling_locations.shape[0]
+    T_loc = sampling_locations.shape[1]
+    
+    # Prüfe ob R_out transponiert werden muss
+    if R_out.dim() == 3:
+        if R_out.shape[0] == T_loc and R_out.shape[1] == B_loc:
+            # R_out hat Shape (T, B, C) -> transponiere zu (B, T, C)
+            logger.debug(f"MSDeformAttn: Transponiere R_out von {R_out.shape} zu (B, T, C)")
+            R_out = R_out.transpose(0, 1).contiguous()
+    
+    logger.debug(f"MSDeformAttn: R_out.shape={R_out.shape}, sampling_locations.shape={sampling_locations.shape}")
+    
     # Hauptpropagation via bilineares Splatting
     R_source = msdeform_attn_lrp(
         R_out=R_out,
@@ -102,6 +117,8 @@ def propagate_msdeformattn(
         use_value_weighting=(W_V is not None and W_O is not None),
         eps=eps,
     )
+    
+    logger.debug(f"MSDeformAttn: R_source.shape={R_source.shape}")
     
     return R_source
 
@@ -144,6 +161,10 @@ def propagate_multihead_attention(
     # V hat Shape (B, H, S, Dh) - extrahiere Dimensionen
     B, H, S, Dh = V.shape
     C = H * Dh
+    
+    # Memory debug info
+    tensor_size_mb = (attn_weights.numel() * 4) / (1024 * 1024)
+    logger.debug(f"MHA: attn_weights size={tensor_size_mb:.1f}MB, shape={attn_weights.shape}")
     
     # R_out von (B, T, C) oder (T, B, C) zu (B, H, T, Dh) reshapen
     total_elements = R_out.numel()
@@ -317,7 +338,11 @@ def propagate_layernorm(
     # Prüfe ob Shapes kompatibel sind
     if x.shape != R_out.shape:
         R_out = _align_shapes_for_layernorm(x, R_out)
-        if R_out is None:
+        # _align_shapes_for_layernorm gibt immer einen Tensor zurück (nie None)
+        # Bei Shape-Mismatch wird R_out unverändert zurückgegeben
+        if x.shape != R_out.shape:
+            # Immer noch inkompatibel - Identität zurückgeben
+            logger.warning(f"LayerNorm: Shapes weiterhin inkompatibel nach Alignment ({x.shape} vs {R_out.shape}) - Identität")
             return R_out
     
     R_in = layernorm_lrp(
@@ -341,7 +366,7 @@ def _align_shapes_for_layernorm(x: Tensor, R_out: Tensor) -> Optional[Tensor]:
         R_out: Ausgabe-Relevanz
         
     Returns:
-        R_out mit angepasster Shape oder None bei Fehler
+        R_out mit angepasster Shape oder Original R_out bei Fehler (nie None!)
     """
     # Versuche Transposition: (T, B, C) <-> (B, T, C)
     if x.dim() == 3 and R_out.dim() == 3:
@@ -355,12 +380,14 @@ def _align_shapes_for_layernorm(x: Tensor, R_out: Tensor) -> Optional[Tensor]:
             logger.debug(f"LayerNorm: Reshape R_out von {R_out.shape} zu {x.shape}")
             return R_out.view(x.shape)
         else:
-            # Shapes sind inkompatibel
+            # Shapes sind inkompatibel - gib R_out unverändert zurück mit Warning
             logger.warning(f"LayerNorm: Kann Shapes nicht anpassen ({x.shape} vs {R_out.shape})")
-            return None
+            # Gib NICHT None zurück, sondern das Original!
+            return R_out
     else:
         logger.warning(f"LayerNorm: Shape-Mismatch x={x.shape} vs R_out={R_out.shape}")
-        return None
+        # Gib NICHT None zurück, sondern das Original!
+        return R_out
 
 
 # =============================================================================
