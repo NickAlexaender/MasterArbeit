@@ -101,6 +101,14 @@ def propagate_msdeformattn(
             # R_out hat Shape (T, B, C) -> transponiere zu (B, T, C)
             logger.debug(f"MSDeformAttn: Transponiere R_out von {R_out.shape} zu (B, T, C)")
             R_out = R_out.transpose(0, 1).contiguous()
+        elif R_out.shape[0] == B_loc and R_out.shape[1] == T_loc:
+            # R_out hat Shape (B, T, C) - alles gut
+            pass
+        else:
+            # Versuche Reshape wenn Elementzahl passt
+            if R_out.numel() == B_loc * T_loc * R_out.shape[-1]:
+                logger.warning(f"MSDeformAttn: Reshape R_out von {R_out.shape} zu ({B_loc}, {T_loc}, -1)")
+                R_out = R_out.view(B_loc, T_loc, -1)
     
     logger.debug(f"MSDeformAttn: R_out.shape={R_out.shape}, sampling_locations.shape={sampling_locations.shape}")
     

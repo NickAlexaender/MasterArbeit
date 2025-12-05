@@ -224,7 +224,7 @@ def gather_images(image_dir: str) -> List[str]:
 
 
 def main(
-    images_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/rot",
+    images_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/rot",
     weights_path: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_final.pth",
     output_dir: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output", "encoder")),
 ):

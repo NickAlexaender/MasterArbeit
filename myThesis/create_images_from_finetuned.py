@@ -280,7 +280,7 @@ def main():
     print("=" * 60)
     
     # Eingabebild
-    image_path = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/new_21_png_jpg.rf.d0c9323560db430e693b33b36cb84c3b.jpg"
+    image_path = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/new_21_png_jpg.rf.d0c9323560db430e693b33b36cb84c3b.jpg"
     
     # Überprüfe ob Bild existiert
     if not os.path.exists(image_path):

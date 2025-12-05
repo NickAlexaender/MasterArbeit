@@ -13,3 +13,9 @@ myThesis/weights/
 # Ignores the images for tests
 myThesis/image/
 
+# Ignore the butterfly dataset
+leedsbutterfly/annotations
+leedsbutterfly/coco
+leedsbutterfly/descriptions
+leedsbutterfly/images
+leedsbutterfly/segmentations

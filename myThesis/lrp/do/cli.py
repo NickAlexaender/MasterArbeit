@@ -12,7 +12,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--images-dir",
         type=str,
-        default="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/1images",
+        default="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/1images",
         help="Ordner mit Eingabebildern (jpg/png)",
     )
     parser.add_argument(

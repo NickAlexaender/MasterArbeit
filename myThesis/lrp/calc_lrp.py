@@ -294,7 +294,23 @@ def run_analysis(
         layer_role = "Decoder"
     else:
         with torch.no_grad():
-            enc_layers = list_encoder_like_layers(model)
+            # Use ModelGraph to get all encoder nodes
+            graph = ModelGraph(model, include_leaf_modules=True)
+            all_enc_nodes = graph.get_by_type(LayerType.ENCODER)
+            
+            # Filter for high-level blocks (TransformerEncoderLayer) to match user expectations for "Layer X"
+            # We look for modules that are likely the main blocks, not internal sub-modules
+            enc_layers = []
+            for node in all_enc_nodes:
+                cls_name = type(node.module).__name__
+                # MaskDINO uses MSDeformAttnTransformerEncoderLayer
+                if "TransformerEncoderLayer" in cls_name or "TransformerDecoderLayer" in cls_name:
+                    enc_layers.append((node.name, node.module))
+            
+            # Fallback: if no blocks found (unlikely), use all
+            if not enc_layers:
+                enc_layers = [(n.name, n.module) for n in all_enc_nodes]
+                
         layer_role = "Encoder"
     
     if not enc_layers:
@@ -335,7 +351,7 @@ def run_analysis(
     
     # LRP Controller vorbereiten (verbose=False um "Replaced..." und "ModelGraph Summary" zu unterdrücken)
     controller = LRPController(model, device=device, eps=lrp_epsilon, verbose=False)
-    controller.prepare()
+    controller.prepare(swap_linear=True)
     
     # Resize-Transformation
     resize_aug = T.ResizeShortestEdge(

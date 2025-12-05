@@ -26,6 +26,7 @@ num_images = 100
 #        design output
 
 
+import os
 from myThesis.encoder import nd_on_transformer_encoder
 from myThesis.encoder import calculate_IoU_for_encoder
 from myThesis.decoder import nd_on_transformer_decoder
@@ -34,21 +35,29 @@ from myThesis.lrp import visualise_network
 from myThesis.lrp import calculate_network
 
 
-images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/1images"
+# images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/1images"
+images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/test_single"
 weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_final.pth"
 model = "car"
 train_state="finetune6"
 concept="rot"
-basic_root="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/"
+
+# Lokaler Pfad für Input-Daten (Bilder, Masken, etc.)
+local_root="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/"
+# Externer Speicher für Output-Daten (Ergebnisse)
+output_root="/Volumes/Untitled/Master-Arbeit_Ergebnisse/output/"
+
+# Sicherheitsprüfung: Externer Speicher muss eingehängt sein
+if not os.path.exists(output_root):
+    raise RuntimeError(f"⚠️ Externer Speicher nicht verfügbar: {output_root}\nBitte stelle sicher, dass der USB-Stick/die Festplatte eingehängt ist.")
 
 
-'''
+
 nd_on_transformer_encoder.main(
     images_dir=images_dir,
     weights_path=weights_path,
-    output_dir=f"{basic_root}output/{model}/{train_state}/encoder"
+    output_dir=f"{output_root}{model}/{train_state}/encoder"
 )
-
 
 
 # Wir brauchen zugriff auf 
@@ -58,9 +67,9 @@ nd_on_transformer_encoder.main(
 
 calculate_IoU_for_encoder.main(
     percentile=0.90, 
-    mask_dir=f"{basic_root}image/{concept}",
-    encoder_out_dir=f"{basic_root}output/{model}/{train_state}/encoder",
-    export_root=f"{basic_root}output/{model}/{train_state}/{concept}/encoder", # encoder zu /{concept}/encoder
+    mask_dir=f"{local_root}image/{concept}",
+    encoder_out_dir=f"{output_root}{model}/{train_state}/encoder",
+    export_root=f"{output_root}{model}/{train_state}/{concept}/encoder", # encoder zu /{concept}/encoder
     export_mode="global-best",
 )
 # Wir brauchen zugriff auf 
@@ -73,43 +82,44 @@ calculate_IoU_for_encoder.main(
 nd_on_transformer_decoder.main(
     images_dir=images_dir,
     weights_path=weights_path,
-    output_dir=f"{basic_root}output/{model}/{train_state}/decoder"
+    output_dir=f"{output_root}{model}/{train_state}/decoder"
 )
 
 calculate_IoU_for_decoder.main_network_dissection_per_query(
     percentile=0.90,
-    mask_dir=f"{basic_root}image/{concept}",
-    decoder_out_dir=f"{basic_root}output/{model}/{train_state}/decoder",
-    export_root=f"{basic_root}output/{model}/{train_state}/{concept}/decoder", # decoder zu /{concept}/decoder
+    mask_dir=f"{local_root}image/{concept}",
+    decoder_out_dir=f"{output_root}{model}/{train_state}/decoder",
+    export_root=f"{output_root}{model}/{train_state}/{concept}/decoder", # decoder zu /{concept}/decoder
     )
-'''
+
+
 calculate_network.main(
         images_dir=images_dir,
-        output_root=f"{basic_root}output/{model}/{train_state}",
-        encoder_rot_dir=f"{basic_root}output/{model}/{train_state}/{concept}/encoder",
-        decoder_dir=f"{basic_root}output/{model}/{train_state}/{concept}/decoder",
-        lrp_out_dir=f"{basic_root}output/{model}/{train_state}/{concept}/lrp",
-        lrp_encoder_dir=f"{basic_root}output/{model}/{train_state}/{concept}/lrp/encoder",
-        lrp_decoder_dir=f"{basic_root}output/{model}/{train_state}/{concept}/lrp/decoder",
-        summary_csv=f"{basic_root}output/{model}/{train_state}/{concept}/lrp/top_features.csv",
+        output_root=f"{output_root}{model}/{train_state}",
+        encoder_rot_dir=f"{output_root}{model}/{train_state}/{concept}/encoder",
+        decoder_dir=f"{output_root}{model}/{train_state}/{concept}/decoder",
+        lrp_out_dir=f"{output_root}{model}/{train_state}/{concept}/lrp",
+        lrp_encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
+        lrp_decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
+        summary_csv=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
         weights_path=weights_path,
     )
 
 visualise_network.main(
     module="encoder",
-    top_features=f"{basic_root}output/{model}/{train_state}/{concept}/lrp/top_features.csv",
-    encoder_dir=f"{basic_root}output/{model}/{train_state}/{concept}/lrp/encoder",
-    decoder_dir=f"{basic_root}output/{model}/{train_state}/{concept}/lrp/decoder",
-    out=f"{basic_root}output/{model}/{train_state}/{concept}/visualisations/encoder_graph",
+    top_features=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
+    encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
+    decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
+    out=f"{output_root}{model}/{train_state}/{concept}/visualisations/encoder_graph",
     k=5
     )
 
 visualise_network.main(
     module="decoder",
-    top_features=f"{basic_root}output/{model}/{train_state}/{concept}/lrp/top_features.csv",
-    encoder_dir=f"{basic_root}output/{model}/{train_state}/{concept}/lrp/encoder",
-    decoder_dir=f"{basic_root}output/{model}/{train_state}/{concept}/lrp/decoder",
-    out=f"{basic_root}output/{model}/{train_state}/{concept}/visualisations/decoder_graph",
+    top_features=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
+    encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
+    decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
+    out=f"{output_root}{model}/{train_state}/{concept}/visualisations/decoder_graph",
     k=5
     )
 

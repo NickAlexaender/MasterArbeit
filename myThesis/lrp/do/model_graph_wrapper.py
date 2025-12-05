@@ -66,9 +66,20 @@ class LayerType(Enum):
         """Bestimmt den LayerType anhand des Modul-Pfads."""
         lpath = path.lower()
         
+        # HEAD zuerst prüfen - diese Module sind innerhalb des Decoders,
+        # aber gehören zur Ausgabeschicht (nicht zum Decoder-Transformer-Block)
+        if any(k in lpath for k in ('class_embed', 'mask_embed', 'bbox_embed', 'ref_point_head')):
+            return cls.HEAD
+        
         # Decoder vor Encoder prüfen (wegen pixel_decoder.transformer.encoder)
+        # Aber nur wenn es NICHT ein HEAD-Modul ist (bereits oben geprüft)
         if '.decoder.' in lpath or 'transformer_decoder' in lpath:
-            if '.encoder.' not in lpath or lpath.index('.decoder.') > lpath.index('.encoder.'):
+            # Zusätzlich prüfen: Ist es ein Decoder-Layer (layers.X) oder ein anderes Decoder-Modul?
+            if '.layers.' in lpath:
+                if '.encoder.' not in lpath or lpath.index('.decoder.') > lpath.index('.encoder.'):
+                    return cls.DECODER
+            elif '.encoder.' not in lpath:
+                # Andere Decoder-Module (nicht layers, nicht HEAD) -> auch DECODER
                 return cls.DECODER
         
         if any(k in lpath for k in ('backbone', 'res', 'swin', 'convnext')):
@@ -251,6 +262,13 @@ class ModelGraph:
         order_idx = 0
         seen_ids: Set[int] = set()
         
+        # Atomare LRP-Modul-Klassen, die immer aufgenommen werden sollen
+        # (auch wenn sie Children haben)
+        ATOMIC_LRP_CLASS_NAMES = frozenset({
+            'LRP_MSDeformAttn',
+            'LRP_MultiheadAttention',
+        })
+        
         for name, module in self.model.named_modules():
             # Überspringe Root-Modul (leerer Name)
             if not name:
@@ -265,9 +283,13 @@ class ModelGraph:
             # Bestimme ob es ein relevanter Layer ist
             is_block = _is_transformer_block(module)
             has_children = bool(list(module.children()))
+            cls_name = type(module).__name__
+            
+            # WICHTIG: Atomare LRP-Module immer aufnehmen, unabhängig von Children
+            is_atomic_lrp = cls_name in ATOMIC_LRP_CLASS_NAMES
             
             # Filterlogik: Wir wollen Transformer-Blöcke und bestimmte wichtige Layer
-            if not is_block and has_children and not self._include_leaf:
+            if not is_block and has_children and not self._include_leaf and not is_atomic_lrp:
                 # Container-Modul ohne Attention -> überspringe (wird durch Children abgedeckt)
                 # AUSNAHME: Backbone-Stufen, Pixel-Decoder-Stufen
                 lname = name.lower()
@@ -412,6 +434,9 @@ class ModelGraph:
         3. Pixel Decoder
         4. Backbone
         
+        WICHTIG: Kinder von atomaren LRP-Modulen (LRP_MSDeformAttn, LRP_MultiheadAttention)
+        werden ausgeschlossen, da das Eltern-Modul die vollständige Propagation übernimmt.
+        
         Args:
             which_module: "all", "encoder" oder "decoder"
                 - "all": Vollständige Propagation durch alle Module
@@ -422,6 +447,22 @@ class ModelGraph:
             Liste von (name, module) Tupeln in LRP-Rückpropagations-Reihenfolge
         """
         result: List[Tuple[str, nn.Module]] = []
+        
+        # Sammle Namen von atomaren LRP-Modulen (MSDeformAttn, MultiheadAttention)
+        # deren Kinder wir überspringen müssen
+        atomic_lrp_parents: Set[str] = set()
+        for node in self.ordered_list:
+            if node.is_lrp_module:
+                cls_name = type(node.module).__name__
+                if cls_name in ("LRP_MSDeformAttn", "LRP_MultiheadAttention"):
+                    atomic_lrp_parents.add(node.name)
+        
+        def _is_child_of_atomic(name: str) -> bool:
+            """Prüft ob ein Layer ein Kind eines atomaren LRP-Moduls ist."""
+            for parent in atomic_lrp_parents:
+                if name.startswith(parent + "."):
+                    return True
+            return False
         
         # Reihenfolge basierend auf which_module
         if which_module == "decoder":
@@ -446,6 +487,9 @@ class ModelGraph:
         for layer_type in order:
             for node in reversed(self._by_type[layer_type]):
                 if node.is_lrp_module:
+                    # Überspringe Kinder von atomaren LRP-Modulen
+                    if _is_child_of_atomic(node.name):
+                        continue
                     result.append((node.name, node.module))
         
         return result

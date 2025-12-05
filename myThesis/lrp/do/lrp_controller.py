@@ -812,12 +812,19 @@ class LRPController:
             if encoder_output.shape[1] == 1:
                 # Format ist (T, B, C) - typisch für Encoder
                 # Setze Relevanz für alle Tokens, aber nur für feature_index
+                # Prüfe Bounds
+                if feature_index >= encoder_output.shape[2]:
+                     raise IndexError(f"feature_index {feature_index} out of bounds for dimension 2 with size {encoder_output.shape[2]}")
                 R_start[:, :, feature_index] = encoder_output[:, :, feature_index].abs()
             else:
                 # Format könnte (B, T, C) sein
+                if feature_index >= encoder_output.shape[2]:
+                     raise IndexError(f"feature_index {feature_index} out of bounds for dimension 2 with size {encoder_output.shape[2]}")
                 R_start[:, :, feature_index] = encoder_output[:, :, feature_index].abs()
         elif encoder_output.dim() == 2:
             # (T, C) -> behandle wie (T, 1, C)
+            if feature_index >= encoder_output.shape[1]:
+                 raise IndexError(f"feature_index {feature_index} out of bounds for dimension 1 with size {encoder_output.shape[1]}")
             R_start[:, feature_index] = encoder_output[:, feature_index].abs()
         
         # Normalisieren

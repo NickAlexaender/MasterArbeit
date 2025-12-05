@@ -58,8 +58,9 @@ def _run_single(module_row: "netcalc.TopFeature") -> None:
 if __name__ == "__main__":
 	# 1) Pfade wie in calculate_network ableiten und Top-Features je Layer ermitteln
 	output_root = os.path.join(basic_root, f"myThesis/output/{model}/{train_state}")
-	encoder_rot_dir = os.path.join(output_root, "encoder/rot")
-	decoder_dir = os.path.join(output_root, "decoder")
+	# KORREKTUR: Die Struktur ist rot/encoder, nicht encoder/rot
+	encoder_rot_dir = os.path.join(output_root, "rot/encoder")
+	decoder_dir = os.path.join(output_root, "rot/decoder")
 
 	print(f"Suche Top-Features in\n  encoder_rot_dir={encoder_rot_dir}\n  decoder_dir={decoder_dir}")
 	rows = netcalc.find_top_k_per_layer(
@@ -76,8 +77,8 @@ if __name__ == "__main__":
 	if len(enc_rows) < 2:
 		print(f"Nur {len(enc_rows)} Encoder-Top-Features gefunden – fülle mit Fallbacks auf.")
 		fallback_enc = [
-			netcalc.TopFeature(module="encoder", layer_idx=2, feature_idx=233, miou=0.0),
-			netcalc.TopFeature(module="encoder", layer_idx=2, feature_idx=100, miou=0.0),
+			netcalc.TopFeature(module="encoder", layer_idx=4, feature_idx=233, miou=0.0),
+			netcalc.TopFeature(module="encoder", layer_idx=4, feature_idx=100, miou=0.0),
 		]
 		enc_rows.extend(fallback_enc[len(enc_rows):2])
 	if len(dec_rows) < 2:

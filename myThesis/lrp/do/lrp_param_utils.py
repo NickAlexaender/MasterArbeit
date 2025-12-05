@@ -182,10 +182,6 @@ def prepare_model_for_lrp(
     """
     stats: Dict[str, int] = {}
     
-    if swap_linear:
-        count = swap_all_modules(model, nn.Linear, LRP_Linear.from_linear, verbose)
-        stats['Linear'] = count
-    
     if swap_layernorm:
         count = swap_all_modules(model, nn.LayerNorm, LRP_LayerNorm.from_layernorm, verbose)
         stats['LayerNorm'] = count
@@ -197,6 +193,10 @@ def prepare_model_for_lrp(
     if swap_msdeform:
         count = swap_msdeformattn_modules(model, verbose)
         stats['MSDeformAttn'] = count
+    
+    if swap_linear:
+        count = swap_all_modules(model, nn.Linear, LRP_Linear.from_linear, verbose)
+        stats['Linear'] = count
     
     return stats
 

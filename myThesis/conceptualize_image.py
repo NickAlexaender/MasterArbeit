@@ -502,14 +502,18 @@ def create_color_visualization_grid(original_image_path, masks_dict, output_path
     cv2.imwrite(output_path, visualization)
     print(f"Farbgitter-Visualisierung gespeichert unter: {output_path}")
 
-def process_all_images():
+def process_dataset(dataset_name, base_path):
     """
-    Verarbeitet alle Bilder aus dem 1images Ordner und speichert die Farbmasken
+    Verarbeitet alle Bilder eines Datasets und speichert die Farbmasken
     in die entsprechenden Farbordner.
+    
+    Args:
+        dataset_name (str): Name des Datasets (z.B. 'car', 'butterfly')
+        base_path (str): Basispfad zum Dataset-Ordner
     """
     # Pfade definieren
-    input_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/1images"
-    base_output_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image"
+    input_dir = os.path.join(base_path, "1images")
+    base_output_dir = base_path
     
     # Alle Farbordner
     color_folders = ['blau', 'braun', 'cyan', 'gelb', 'grau', 'grün', 'lila', 
@@ -522,20 +526,21 @@ def process_all_images():
     # Finde alle Bilder im Input-Ordner
     if not os.path.exists(input_dir):
         print(f"FEHLER: Ordner nicht gefunden: {input_dir}")
-        return
+        return 0
     
     image_files = sorted([f for f in os.listdir(input_dir) 
                          if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
     
     if not image_files:
         print(f"Keine Bilder gefunden in: {input_dir}")
-        return
+        return 0
     
-    print("=== Farbmasken-Extraktion für Network Dissection ===")
+    print(f"\n{'#'*70}")
+    print(f"### Dataset: {dataset_name.upper()}")
+    print(f"{'#'*70}")
     print(f"Gefundene Bilder: {len(image_files)}")
     print(f"Input-Ordner: {input_dir}")
     print(f"Output-Basisordner: {base_output_dir}")
-    print()
     
     # Verarbeite jedes Bild
     total_processed = 0
@@ -543,7 +548,7 @@ def process_all_images():
         input_image_path = os.path.join(input_dir, image_file)
         
         print(f"\n{'='*70}")
-        print(f"Verarbeite Bild {idx}/{len(image_files)}: {image_file}")
+        print(f"[{dataset_name}] Verarbeite Bild {idx}/{len(image_files)}: {image_file}")
         print(f"{'='*70}")
         
         # Temporärer Ordner für die Masken dieses Bildes
@@ -594,12 +599,53 @@ def process_all_images():
             if os.path.exists(temp_output_dir):
                 shutil.rmtree(temp_output_dir)
     
-    print(f"\n{'='*70}")
-    print(f"=== ZUSAMMENFASSUNG ===")
-    print(f"{'='*70}")
-    print(f"Erfolgreich verarbeitet: {total_processed}/{len(image_files)} Bilder")
-    print(f"Farbmasken gespeichert in: {base_output_dir}/[farbname]/")
-    print("\nFarbextraktion abgeschlossen!")
+    print(f"\n[{dataset_name}] Erfolgreich verarbeitet: {total_processed}/{len(image_files)} Bilder")
+    return total_processed
+
+def process_all_images():
+    """
+    Verarbeitet alle Bilder aus allen Datasets (butterfly und car) und speichert 
+    die Farbmasken in die entsprechenden Farbordner.
+    """
+    # Basispfad für alle Datasets
+    thesis_image_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image"
+    
+    # Liste aller zu verarbeitenden Datasets
+    datasets = [
+        ("butterfly", os.path.join(thesis_image_dir, "butterfly")),
+        ("car", os.path.join(thesis_image_dir, "car"))
+    ]
+    
+    print("="*70)
+    print("=== Farbmasken-Extraktion für Network Dissection ===")
+    print("="*70)
+    print(f"Zu verarbeitende Datasets: {[d[0] for d in datasets]}")
+    
+    # Statistiken
+    total_results = {}
+    
+    # Verarbeite jedes Dataset
+    for dataset_name, dataset_path in datasets:
+        if os.path.exists(dataset_path):
+            processed = process_dataset(dataset_name, dataset_path)
+            total_results[dataset_name] = processed
+        else:
+            print(f"\nWARNUNG: Dataset-Ordner nicht gefunden: {dataset_path}")
+            total_results[dataset_name] = 0
+    
+    # Gesamtzusammenfassung
+    print(f"\n{'#'*70}")
+    print(f"### GESAMTZUSAMMENFASSUNG ###")
+    print(f"{'#'*70}")
+    
+    total_images = 0
+    for dataset_name, count in total_results.items():
+        print(f"  {dataset_name}: {count} Bilder verarbeitet")
+        total_images += count
+    
+    print(f"\nGesamt: {total_images} Bilder verarbeitet")
+    print(f"Farbmasken gespeichert in: {thesis_image_dir}/[dataset]/[farbname]/")
+    print("\nFarbextraktion für alle Datasets abgeschlossen!")
 
 if __name__ == "__main__":
     process_all_images()
