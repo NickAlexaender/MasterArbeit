@@ -92,10 +92,45 @@ def register_car_parts_datasets():
             'tailgate', 'trunk', 'wheel'
         ]
 
-def setup_config(model_type="pretrained"):
+def register_butterfly_datasets():
+    """
+    Registriere die Butterfly Datasets für das Fine-tuned Modell
+    """
+    # Pfade zu den COCO-Annotations und Bildern
+    dataset_root = "/Users/nicklehmacher/Alles/MasterArbeit/leedsbutterfly/coco"
+    
+    # Register validation dataset (für Metadaten)
+    try:
+        register_coco_instances(
+            "butterfly_val", 
+            {},
+            os.path.join(dataset_root, "annotations", "instances_val2017.json"),
+            os.path.join(dataset_root, "val2017")
+        )
+        
+        # Setze Class Names für Butterfly (10 Klassen)
+        butterfly_classes = [
+            'Danaus plexippus', 'Heliconius charitonius', 'Heliconius erato', 
+            'Junonia coenia', 'Lycaena phlaeas', 'Nymphalis antiopa', 
+            'Papilio cresphontes', 'Pieris rapae', 'Vanessa atalanta', 'Vanessa cardui'
+        ]
+        
+        MetadataCatalog.get("butterfly_val").set(thing_classes=butterfly_classes)
+        print(f"✅ Butterfly Dataset registriert mit {len(butterfly_classes)} Klassen")
+        return butterfly_classes
+    except Exception as e:
+        print(f"⚠️ Butterfly Dataset bereits registriert oder Fehler: {e}")
+        return [
+            'Danaus plexippus', 'Heliconius charitonius', 'Heliconius erato', 
+            'Junonia coenia', 'Lycaena phlaeas', 'Nymphalis antiopa', 
+            'Papilio cresphontes', 'Pieris rapae', 'Vanessa atalanta', 'Vanessa cardui'
+        ]
+
+def setup_config(model_type="pretrained", dataset_type="car_parts"):
     """
     Setup MaskDINO Konfiguration basierend auf test_maskdino.py
     model_type: "pretrained" oder "finetuned"
+    dataset_type: "car_parts" oder "butterfly"
     """
     cfg = get_cfg()
     add_maskdino_config(cfg)
@@ -134,9 +169,12 @@ def setup_config(model_type="pretrained"):
     cfg.MODEL.SEM_SEG_HEAD.COMMON_STRIDE = 4
     cfg.MODEL.SEM_SEG_HEAD.TRANSFORMER_ENC_LAYERS = 6
     
-    # Anzahl Klassen je nach Modell-Typ
+    # Anzahl Klassen je nach Modell-Typ und Dataset
     if model_type == "finetuned":
-        cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 23  # Car Parts Klassen
+        if dataset_type == "butterfly":
+            cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 10  # Butterfly Klassen
+        else:
+            cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 23  # Car Parts Klassen
     else:
         cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 80  # COCO Klassen
     
@@ -168,10 +206,14 @@ def setup_config(model_type="pretrained"):
     cfg.MODEL.MaskDINO.DN_NUM = 100
     cfg.MODEL.MaskDINO.INITIALIZE_BOX_TYPE = "bitmask"
     
-    # Dataset-Einstellungen je nach Modell-Typ
+    # Dataset-Einstellungen je nach Modell-Typ und Dataset
     if model_type == "finetuned":
-        cfg.DATASETS.TRAIN = ("car_parts_train",)
-        cfg.DATASETS.TEST = ("car_parts_val",)
+        if dataset_type == "butterfly":
+            cfg.DATASETS.TRAIN = ("butterfly_train",)
+            cfg.DATASETS.TEST = ("butterfly_val",)
+        else:
+            cfg.DATASETS.TRAIN = ("car_parts_train",)
+            cfg.DATASETS.TEST = ("car_parts_val",)
     else:
         cfg.DATASETS.TRAIN = ("coco_2017_train",)
         cfg.DATASETS.TEST = ("coco_2017_val",)
@@ -195,11 +237,12 @@ def setup_config(model_type="pretrained"):
     
     return cfg
 
-def process_image_with_model(image_path, weights_path, model_type, output_suffix):
+def process_image_with_model(image_path, weights_path, model_type, output_suffix, dataset_type="car_parts"):
     """
     Verarbeite ein Bild mit einem spezifischen Modell
+    dataset_type: "car_parts" oder "butterfly"
     """
-    print(f"\n🔧 Verarbeite mit {model_type} Modell...")
+    print(f"\n🔧 Verarbeite mit {model_type} Modell ({dataset_type})...")
     print(f"📁 Weights: {os.path.basename(weights_path)}")
     
     # Bild laden
@@ -220,7 +263,7 @@ def process_image_with_model(image_path, weights_path, model_type, output_suffix
     im_rgb = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
     
     # Konfiguration setup
-    cfg = setup_config(model_type)
+    cfg = setup_config(model_type, dataset_type)
     cfg.MODEL.WEIGHTS = weights_path
     
     print(f"📋 Anzahl Klassen: {cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES}")
@@ -236,7 +279,10 @@ def process_image_with_model(image_path, weights_path, model_type, output_suffix
         
         # Passende Metadaten wählen
         if model_type == "finetuned":
-            metadata = MetadataCatalog.get("car_parts_val")
+            if dataset_type == "butterfly":
+                metadata = MetadataCatalog.get("butterfly_val")
+            else:
+                metadata = MetadataCatalog.get("car_parts_val")
         else:
             metadata = MetadataCatalog.get("coco_2017_val")
         
@@ -272,130 +318,190 @@ def process_image_with_model(image_path, weights_path, model_type, output_suffix
         traceback.print_exc()
         return None, 0
 
+def get_model_files_from_folder(folder_path):
+    """
+    Finde alle .pth Modell-Dateien in einem Ordner und sortiere sie
+    """
+    if not os.path.exists(folder_path):
+        print(f"⚠️ Ordner nicht gefunden: {folder_path}")
+        return []
+    
+    model_files = []
+    for f in os.listdir(folder_path):
+        if f.endswith('.pth'):
+            model_files.append(os.path.join(folder_path, f))
+    
+    # Sortiere nach Iteration (model_0000499.pth -> 499)
+    def extract_iter(path):
+        filename = os.path.basename(path)
+        if filename == "model_final.pth":
+            return float('inf')  # Final am Ende
+        try:
+            # Extrahiere Nummer aus model_0000499.pth
+            num = int(filename.replace("model_", "").replace(".pth", ""))
+            return num
+        except:
+            return 0
+    
+    model_files.sort(key=extract_iter)
+    return model_files
+
 def main():
     """
-    Hauptfunktion - Verarbeite Bild mit allen 7 Modellen
+    Hauptfunktion - Verarbeite Bilder mit allen Modellen aus beiden Ordnern
     """
-    print("🚀 MaskDINO Modell-Vergleich - 7 Modelle")
-    print("=" * 60)
+    print("🚀 MaskDINO Modell-Vergleich - Car Parts & Butterfly")
+    print("=" * 70)
     
-    # Eingabebild
-    image_path = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/new_21_png_jpg.rf.d0c9323560db430e693b33b36cb84c3b.jpg"
+    # Basis-Pfade
+    base_output_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output"
     
-    # Überprüfe ob Bild existiert
-    if not os.path.exists(image_path):
-        print(f"❌ Eingabebild nicht gefunden: {image_path}")
-        return
+    # Konfiguration für beide Datensätze
+    datasets_config = {
+        "car_parts": {
+            "finetune_folder": os.path.join(base_output_dir, "car_parts_finetune"),
+            "test_image": "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/new_21_png_jpg.rf.d0c9323560db430e693b33b36cb84c3b.jpg",
+            "register_func": register_car_parts_datasets,
+            "num_classes": 23,
+            "metadata_name": "car_parts_val"
+        },
+        "butterfly": {
+            "finetune_folder": os.path.join(base_output_dir, "butterfly_parts_finetune"),
+            "test_image": "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/butterfly/1images/0010005.png",
+            "register_func": register_butterfly_datasets,
+            "num_classes": 10,
+            "metadata_name": "butterfly_val"
+        }
+    }
     
-    print(f"📸 Verarbeite Bild: {os.path.basename(image_path)}")
+    # Pre-trained Modell (gemeinsam für beide)
+    pretrained_weights = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/weights/maskdino_r50_50ep_300q_hid1024_3sd1_instance_maskenhanced_mask46.1ap_box51.5ap.pth"
     
     # Erstelle Output-Ordner
-    output_dir = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/model_comparison_outputs"
+    output_dir = os.path.join(base_output_dir, "model_comparison_outputs")
     os.makedirs(output_dir, exist_ok=True)
-    print(f"📁 Output-Ordner erstellt: {output_dir}")
+    print(f"📁 Output-Ordner: {output_dir}")
     
-    # Registriere Car Parts Datasets für Fine-tuned Modell
-    register_car_parts_datasets()
+    all_results = []
     
-    # Modell-Konfigurationen - Alle 7 Modelle
-    models = [
-        {
-            "name": "Pre-trained COCO",
-            "weights": "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/weights/maskdino_r50_50ep_300q_hid1024_3sd1_instance_maskenhanced_mask46.1ap_box51.5ap.pth",
-            "type": "pretrained",
-            "suffix": "pretrained_coco"
-        },
-        {
-            "name": "Fine-tuned Iter 500",
-            "weights": "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_0000499.pth",
-            "type": "finetuned",
-            "suffix": "finetuned_iter500"
-        },
-        {
-            "name": "Fine-tuned Iter 1000", 
-            "weights": "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_0000999.pth",
-            "type": "finetuned",
-            "suffix": "finetuned_iter1000"
-        },
-        {
-            "name": "Fine-tuned Iter 1500",
-            "weights": "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_0001499.pth",
-            "type": "finetuned",
-            "suffix": "finetuned_iter1500"
-        },
-        {
-            "name": "Fine-tuned Iter 2000",
-            "weights": "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_0001999.pth",
-            "type": "finetuned",
-            "suffix": "finetuned_iter2000"
-        },
-        {
-            "name": "Fine-tuned Iter 2500",
-            "weights": "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_0002499.pth",
-            "type": "finetuned",
-            "suffix": "finetuned_iter2500"
-        },
-        {
-            "name": "Fine-tuned Final",
-            "weights": "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_final.pth",
-            "type": "finetuned",
-            "suffix": "finetuned_final"
-        }
-    ]
-    
-    results = []
-    
-    # Verarbeite mit allen 7 Modellen
-    for i, model in enumerate(models, 1):
-        print(f"\n{'='*70}")
-        print(f"🔍 Modell {i}/7: {model['name']}")
-        print(f"{'='*70}")
+    # Verarbeite beide Datensätze
+    for dataset_name, config in datasets_config.items():
+        print(f"\n{'#'*70}")
+        print(f"# DATENSATZ: {dataset_name.upper()}")
+        print(f"{'#'*70}")
         
-        # Überprüfe ob Weights existieren
-        if not os.path.exists(model["weights"]):
-            print(f"❌ Gewichte nicht gefunden: {model['weights']}")
-            print("   Überspringe dieses Modell...")
+        # Überprüfe ob Testbild existiert
+        if not os.path.exists(config["test_image"]):
+            print(f"❌ Testbild nicht gefunden: {config['test_image']}")
             continue
         
-        try:
-            output_path, num_detections = process_image_with_model(
-                image_path, 
-                model["weights"], 
-                model["type"], 
-                model["suffix"]
-            )
-            
-            results.append({
-                "model": model["name"],
-                "output": output_path,
-                "detections": num_detections,
-                "weights_file": os.path.basename(model["weights"])
+        print(f"📸 Testbild: {os.path.basename(config['test_image'])}")
+        
+        # Registriere Dataset
+        config["register_func"]()
+        
+        # Finde alle Modell-Dateien im Fine-tune Ordner
+        finetune_models = get_model_files_from_folder(config["finetune_folder"])
+        print(f"🔍 Gefundene Fine-tuned Modelle: {len(finetune_models)}")
+        for m in finetune_models:
+            print(f"   - {os.path.basename(m)}")
+        
+        # Erstelle Modell-Liste: Pre-trained + alle Fine-tuned
+        models = []
+        
+        # Pre-trained Modell (nur einmal pro Dataset für Vergleich)
+        if os.path.exists(pretrained_weights):
+            models.append({
+                "name": f"Pre-trained COCO ({dataset_name})",
+                "weights": pretrained_weights,
+                "type": "pretrained",
+                "suffix": f"{dataset_name}_pretrained_coco",
+                "folder": "pretrained",
+                "dataset": dataset_name
             })
+        
+        # Alle Fine-tuned Modelle
+        folder_name = os.path.basename(config["finetune_folder"])
+        for weights_path in finetune_models:
+            model_filename = os.path.basename(weights_path)
+            # Extrahiere Iteration aus Dateiname
+            if model_filename == "model_final.pth":
+                iter_name = "final"
+            else:
+                iter_num = model_filename.replace("model_", "").replace(".pth", "")
+                iter_name = f"iter{int(iter_num)+1}"  # +1 weil 0-indexed
             
-        except Exception as e:
-            print(f"❌ Fehler bei {model['name']}: {e}")
-            continue
+            models.append({
+                "name": f"{folder_name} - {model_filename}",
+                "weights": weights_path,
+                "type": "finetuned",
+                "suffix": f"{dataset_name}_{folder_name}_{iter_name}",
+                "folder": folder_name,
+                "dataset": dataset_name
+            })
+        
+        # Verarbeite alle Modelle für diesen Datensatz
+        for i, model in enumerate(models, 1):
+            print(f"\n{'='*70}")
+            print(f"🔍 Modell {i}/{len(models)}: {model['name']}")
+            print(f"📂 Ordner: {model['folder']}")
+            print(f"🏷️ Dataset: {model['dataset']}")
+            print(f"{'='*70}")
+            
+            # Überprüfe ob Weights existieren
+            if not os.path.exists(model["weights"]):
+                print(f"❌ Gewichte nicht gefunden: {model['weights']}")
+                continue
+            
+            try:
+                output_path, num_detections = process_image_with_model(
+                    config["test_image"], 
+                    model["weights"], 
+                    model["type"], 
+                    model["suffix"],
+                    dataset_type=dataset_name
+                )
+                
+                all_results.append({
+                    "dataset": dataset_name,
+                    "model": model["name"],
+                    "folder": model["folder"],
+                    "output": output_path,
+                    "detections": num_detections,
+                    "weights_file": os.path.basename(model["weights"])
+                })
+                
+            except Exception as e:
+                print(f"❌ Fehler bei {model['name']}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
     
     # Zusammenfassung
+    print(f"\n{'#'*70}")
+    print("📊 ERGEBNISSE ZUSAMMENFASSUNG - ALLE MODELLE")
+    print(f"{'#'*70}")
+    
+    # Gruppiere nach Dataset
+    for dataset_name in datasets_config.keys():
+        dataset_results = [r for r in all_results if r["dataset"] == dataset_name]
+        if dataset_results:
+            print(f"\n📁 {dataset_name.upper()} ({len(dataset_results)} Modelle):")
+            print("-" * 60)
+            for i, result in enumerate(dataset_results, 1):
+                if result["output"]:
+                    print(f"  ✅ {i}. {result['model']}:")
+                    print(f"     📂 Ordner: {result['folder']}")
+                    print(f"     📁 Output: {os.path.basename(result['output'])}")
+                    print(f"     🎯 Erkannte Objekte: {result['detections']}")
+                    print(f"     🏋️ Weights: {result['weights_file']}")
+                else:
+                    print(f"  ❌ {i}. {result['model']}: Fehler")
+    
     print(f"\n{'='*70}")
-    print("📊 ERGEBNISSE ZUSAMMENFASSUNG - ALLE 7 MODELLE")
-    print(f"{'='*70}")
-    
-    for i, result in enumerate(results, 1):
-        if result["output"]:
-            print(f"✅ {i}. {result['model']}:")
-            print(f"   📁 Output: {os.path.basename(result['output'])}")
-            print(f"   🎯 Erkannte Objekte: {result['detections']}")
-            print(f"   🏋️ Weights: {result['weights_file']}")
-            print()
-        else:
-            print(f"❌ {i}. {result['model']}: Fehler bei der Verarbeitung")
-            print()
-    
-    print(f"🎉 Verarbeitung aller 7 Modelle abgeschlossen!")
-    print(f"📸 Eingabebild: {os.path.basename(image_path)}")
+    print(f"🎉 Verarbeitung abgeschlossen!")
+    print(f"📊 Erfolgreiche Verarbeitungen: {len([r for r in all_results if r['output']])}/{len(all_results)}")
     print(f"📁 Alle Outputs gespeichert in: {output_dir}")
-    print(f"📊 Erfolgreiche Verarbeitungen: {len([r for r in results if r['output']])}/7")
 
 if __name__ == "__main__":
     main()
