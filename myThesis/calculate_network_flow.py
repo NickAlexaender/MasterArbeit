@@ -35,7 +35,7 @@ from myThesis.lrp import visualise_network
 from myThesis.lrp import calculate_network
 
 
-# images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/1images"
+# images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/1images"
 images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/test_single"
 weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_final.pth"
 model = "car"

@@ -272,7 +272,7 @@ def build_model_and_load_weights(weights_path: str) -> Tuple[torch.nn.Module, Li
 	return model, classes
 
 
-def gather_images(image_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/rot") -> List[Tuple[str, str]]:
+def gather_images(image_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/rot") -> List[Tuple[str, str]]:
 	"""
 	Stellt eine Liste von (image_id, image_path) Tupeln zusammen.
 	image_id wird aus dem Dateinamen extrahiert (z.B. "image 1.jpg" -> "image_1")
@@ -322,7 +322,7 @@ def _require(name: str) -> None:
 
 
 def main(    
-    images_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/rot",
+    images_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/rot",
     weights_path: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_final.pth",
     output_dir: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output", "encoder")),
 ):

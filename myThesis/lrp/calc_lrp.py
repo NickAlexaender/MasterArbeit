@@ -517,7 +517,7 @@ def run_analysis(
 
 
 def main(
-    images_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/1images",
+    images_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/1images",
     layer_index: int = 3,
     feature_index: int = 214,
     target_norm: str = "sum1",
