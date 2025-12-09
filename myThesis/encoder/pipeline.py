@@ -164,6 +164,7 @@ def _export_global_best(
     export_root: str,
     encoder_out_dir: Optional[str],
     combine: str,
+    mask_dir: Optional[str] = None,
 ) -> None:
     """Exportiert global_best: nur das beste Bild des global besten Features (on-the-fly)."""
     if global_best is None:
@@ -181,7 +182,7 @@ def _export_global_best(
 
     # Falls best_image_id bekannt: nur dieses Bild rendern
     best_overlay_path = None
-    for item in iter_iou_inputs(encoder_out_dir=encoder_out_dir, mask_dir=None):
+    for item in iter_iou_inputs(encoder_out_dir=encoder_out_dir, mask_dir=mask_dir):
         if item.layer_idx != gb_layer or item.feature_idx != gb_feat:
             continue
         if gb_best_img_id and item.image_id != gb_best_img_id:
@@ -499,7 +500,7 @@ def main_export_network_dissection(
     )
 
     # Global_best-Overlay (nur ein Bild)
-    _export_global_best(global_best, export_root=export_root, encoder_out_dir=encoder_out_dir, combine=DEFAULT_COMBINE)
+    _export_global_best(global_best, export_root=export_root, encoder_out_dir=encoder_out_dir, combine=DEFAULT_COMBINE, mask_dir=mask_dir)
     logger.info("Network Dissection Export abgeschlossen in %.2fs. Root: %s", time.time() - t0, export_root)
 
 

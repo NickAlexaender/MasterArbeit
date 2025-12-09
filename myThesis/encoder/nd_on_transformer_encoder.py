@@ -89,32 +89,35 @@ if mythesis_path not in sys.path:
 # Übergabe-Funktion importieren
 # Import der Übergabe-Funktion aus der Nachbar-Datei
 from myThesis.encoder.weights_extraction_transformer_encoder import accept_weights_model_images
+# Import der zentralen Modell-Konfiguration
+from myThesis.model_config import get_model_config, get_classes, get_num_classes, get_dataset_name, get_dataset_root
 
 
 # --- Dataset-Registrierung ---
-def register_datasets() -> List[str]:
-    dataset_root = "/Users/nicklehmacher/Alles/MasterArbeit/ultralytics/datasets"
+def register_datasets(model: str = "car") -> List[str]:
+    """Registriert das Dataset für das angegebene Modell (car oder butterfly)."""
+    config = get_model_config(model)
+    dataset_name = config["dataset_name"]
+    dataset_root = config["dataset_root"]
+    classes = config["classes"]
 
-    if "car_parts_train" not in DatasetCatalog.list():
+    if dataset_name not in DatasetCatalog.list():
         register_coco_instances(
-            "car_parts_train", {},
-            os.path.join(dataset_root, "annotations", "instances_train2017.json"),
-            os.path.join(dataset_root, "images")
+            dataset_name, {},
+            os.path.join(dataset_root, config["annotations_train"]),
+            os.path.join(dataset_root, config["images_subdir"])
         )
 
-    car_parts_classes = [
-        'back_bumper', 'back_door', 'back_glass', 'back_left_door', 'back_left_light',
-        'back_light', 'back_right_door', 'back_right_light', 'front_bumper', 'front_door',
-        'front_glass', 'front_left_door', 'front_left_light', 'front_light', 'front_right_door',
-        'front_right_light', 'hood', 'left_mirror', 'object', 'right_mirror',
-        'tailgate', 'trunk', 'wheel'
-    ]
-    MetadataCatalog.get("car_parts_train").set(thing_classes=car_parts_classes)
-    return car_parts_classes
+    MetadataCatalog.get(dataset_name).set(thing_classes=classes)
+    return classes
 
 
 # --- Config/Modellaufbau ---
-def build_cfg():
+def build_cfg(model: str = "car"):
+    """Baut die Konfiguration für das angegebene Modell (car oder butterfly)."""
+    num_classes = get_num_classes(model)
+    dataset_name = get_dataset_name(model)
+    
     cfg = get_cfg()
     add_maskdino_config(cfg)
 
@@ -135,7 +138,7 @@ def build_cfg():
 
     cfg.MODEL.SEM_SEG_HEAD.NAME = "MaskDINOHead"
     cfg.MODEL.SEM_SEG_HEAD.IGNORE_VALUE = 255
-    cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 23
+    cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = num_classes
     cfg.MODEL.SEM_SEG_HEAD.LOSS_WEIGHT = 1.0
     cfg.MODEL.SEM_SEG_HEAD.CONVS_DIM = 256
     cfg.MODEL.SEM_SEG_HEAD.MASK_DIM = 256
@@ -180,7 +183,7 @@ def build_cfg():
     cfg.INPUT.MIN_SIZE_TEST = 800
     cfg.INPUT.MAX_SIZE_TEST = 1333
 
-    cfg.DATASETS.TRAIN = ("car_parts_train",)
+    cfg.DATASETS.TRAIN = (dataset_name,)
 
     cfg.MODEL.MaskDINO.TEST.SEMANTIC_ON = False
     cfg.MODEL.MaskDINO.TEST.INSTANCE_ON = True
@@ -193,11 +196,12 @@ def build_cfg():
     return cfg
 
 
-def build_model_and_load_weights(weights_path: str) -> torch.nn.Module:
+def build_model_and_load_weights(weights_path: str, model: str = "car") -> torch.nn.Module:
     """Baut das Modell und lädt die angegebenen Gewichte."""
-    classes = register_datasets()
-    cfg = build_cfg()
-    assert len(MetadataCatalog.get("car_parts_train").thing_classes) == cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES, \
+    classes = register_datasets(model)
+    cfg = build_cfg(model)
+    dataset_name = get_dataset_name(model)
+    assert len(MetadataCatalog.get(dataset_name).thing_classes) == cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES, \
         "NUM_CLASSES ≠ Anzahl Labels in Dataset"
     cfg.MODEL.WEIGHTS = ""
     cfg.freeze()
@@ -227,6 +231,7 @@ def main(
     images_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/rot",
     weights_path: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_final.pth",
     output_dir: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output", "encoder")),
+    model: str = "car",
 ):
     setup_logger(name="maskdino")
     if not os.path.exists(weights_path):
@@ -235,8 +240,8 @@ def main(
     # Ausgabeordner vorbereiten
     os.makedirs(output_dir, exist_ok=True)
 
-    print("🔧 Baue Modell und lade Gewichte…")
-    model = build_model_and_load_weights(weights_path)
+    print(f"🔧 Baue Modell ({model}) und lade Gewichte…")
+    model_nn = build_model_and_load_weights(weights_path, model)
 
     print("🖼️  Sammle Bilder…")
     image_list = gather_images(images_dir)
@@ -245,7 +250,7 @@ def main(
         print("⚠️ Keine Bilder gefunden – Übergabe erfolgt mit leerer Liste.")
 
     print("➡️  Übergabe an weights_extraction_transformer_encoder.accept_weights_model_images …")
-    accept_weights_model_images(weights_path, model, image_list, base_out_layers=output_dir)
+    accept_weights_model_images(weights_path, model_nn, image_list, base_out_layers=output_dir)
     print("✅ Übergabe abgeschlossen.")
 
 

@@ -189,15 +189,18 @@ def run_lrp_for(
 	lrp_decoder_dir: str = DEFAULT_LRP_DECODER_DIR,
 	limit_images: Optional[int] = None,
 	weights_path: Optional[str] = None,
+	model_type: str = "car",
 ) -> None:
 	# Import here to avoid heavy import time when only listing
+	import gc
+	import torch
 	from myThesis.lrp import calc_lrp
 
 	# Ensure output folders
 	os.makedirs(lrp_encoder_dir, exist_ok=True)
 	os.makedirs(lrp_decoder_dir, exist_ok=True)
 
-	for r in rows:
+	for i, r in enumerate(rows):
 		# calc_lrp.main expects 1-based layer index; our CSV layers are 0-based
 		layer_1based = r.layer_idx + 1
 		which_module = r.module
@@ -206,7 +209,7 @@ def run_lrp_for(
 		else:
 			out_csv = os.path.join(lrp_decoder_dir, f"layer{r.layer_idx}_feat{r.feature_idx}.csv")
 
-		# Run
+		# Run with cache disabled to free memory after each run
 		calc_lrp.main(
 			images_dir=images_dir,
 			layer_index=layer_1based,
@@ -214,9 +217,19 @@ def run_lrp_for(
 			which_module=which_module,
 			output_csv=out_csv,
 			weights_path=weights_path,
+			model_type=model_type,
+			use_model_cache=False,  # Disable cache to free memory
 			# Keep the rest as defaults; expose limit_images to be optionally stricter
 			#limit_images=(0 if limit_images is None else max(0, int(limit_images))),
 		)
+		
+		# Explicit memory cleanup after each LRP run
+		gc.collect()
+		if torch.cuda.is_available():
+			torch.cuda.empty_cache()
+		
+		# Progress indicator
+		print(f"✅ LRP {i+1}/{len(rows)} abgeschlossen: {which_module} L{r.layer_idx} F{r.feature_idx}")
 
 
 def main(
@@ -236,6 +249,8 @@ def main(
 	summary_csv: Optional[str] = None,
 	# Model weights override (optional)
 	weights_path: Optional[str] = None,
+	# Modelltyp ('car' oder 'butterfly')
+	model_type: str = "car",
 ) -> None:
 	# Resolve all effective paths based on overrides
 	paths = _compute_paths(
@@ -267,6 +282,7 @@ def main(
 			lrp_decoder_dir=paths["lrp_decoder_dir"],
 			limit_images=limit_images,
 			weights_path=weights_path,
+			model_type=model_type,
 		)
 
 

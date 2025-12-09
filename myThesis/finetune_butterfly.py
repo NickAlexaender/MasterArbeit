@@ -330,16 +330,16 @@ def setup_config():
     # Training-spezifische Parameter (für Fine-tuning angepasst)
     cfg.SOLVER.IMS_PER_BATCH = 1  # Sehr kleine Batch Size für CPU
     cfg.SOLVER.BASE_LR = 0.00001  # Sehr niedrige Learning Rate für Fine-tuning
-    cfg.SOLVER.MAX_ITER = 3000  # Anzahl Training Iterationen
-    cfg.SOLVER.STEPS = (2000, 2500)  # Learning rate decay steps
+    cfg.SOLVER.MAX_ITER = 1500  # Anzahl Training Iterationen
+    cfg.SOLVER.STEPS = (1000, 1250)  # Learning rate decay steps
     cfg.SOLVER.GAMMA = 0.1  # Learning rate decay factor
-    cfg.SOLVER.WARMUP_ITERS = 50  # Warmup iterations -> 500
+    cfg.SOLVER.WARMUP_ITERS = 250  # Warmup iterations -> 500
     cfg.SOLVER.WARMUP_FACTOR = 0.001
     cfg.SOLVER.WEIGHT_DECAY = 0.0001
-    cfg.SOLVER.CHECKPOINT_PERIOD = 50  # Save checkpoint every 500 iterations -> 50
+    cfg.SOLVER.CHECKPOINT_PERIOD = 250  # Save checkpoint every 500 iterations -> 500
     
     # Evaluation
-    cfg.TEST.EVAL_PERIOD = 500  # Evaluate every 500 iterations
+    # cfg.TEST.EVAL_PERIOD = 500  # Evaluate every 500 iterations
     
     # Data Loader
     cfg.DATALOADER.NUM_WORKERS = 0  # Setze auf 0 um Multiprocessing-Probleme zu vermeiden
@@ -380,9 +380,8 @@ def main(args):
     trainer = ButterflyTrainer(cfg)
     trainer.resume_or_load(resume=args.resume)
     
-    # Add hooks for better monitoring
+    # Add hooks for better monitoring (without evaluation to avoid OOM)
     trainer.register_hooks([
-        hooks.EvalHook(cfg.TEST.EVAL_PERIOD, lambda: trainer.test(cfg, trainer.model)),
         hooks.PeriodicCheckpointer(trainer.checkpointer, cfg.SOLVER.CHECKPOINT_PERIOD),
     ])
     

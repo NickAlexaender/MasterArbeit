@@ -76,6 +76,9 @@ from myThesis.lrp.do.model_graph_wrapper import (
 )
 from myThesis.lrp.do.tensor_ops import aggregate_channel_relevance, build_target_relevance
 
+# Import der zentralen Modell-Konfiguration
+from myThesis.model_config import get_model_config, get_classes, get_dataset_name
+
 # Logger für dieses Modul
 logger = logging.getLogger("lrp.calc")
 
@@ -102,17 +105,13 @@ def _setup_determinism(seed: int = SEED, strict: bool = DETERMINISTIC) -> None:
             logger.warning("Deterministische Algorithmen konnten nicht aktiviert werden.")
 
 
-def _register_car_parts_metadata() -> None:
-    """Registriert die Car-Parts-Klassen für Metadaten (optional)."""
+def _register_model_metadata(model: str = "car") -> None:
+    """Registriert die Klassen für Metadaten (optional)."""
     try:
-        car_parts_classes = [
-            'back_bumper', 'back_door', 'back_glass', 'back_left_door', 'back_left_light',
-            'back_light', 'back_right_door', 'back_right_light', 'front_bumper', 'front_door',
-            'front_glass', 'front_left_door', 'front_left_light', 'front_light', 'front_right_door',
-            'front_right_light', 'hood', 'left_mirror', 'object', 'right_mirror',
-            'tailgate', 'trunk', 'wheel'
-        ]
-        MetadataCatalog.get("car_parts_minimal").set(thing_classes=car_parts_classes)
+        config = get_model_config(model)
+        dataset_name = config["dataset_name"]
+        classes = config["classes"]
+        MetadataCatalog.get(f"{dataset_name}_minimal").set(thing_classes=classes)
     except Exception:
         pass  # Metadaten sind optional
 
@@ -166,27 +165,28 @@ def _aggregate_relevance(vec: Tensor, axis: str) -> Tensor:
             return vec.reshape(-1)
 
 
-def _get_or_load_model(weights_path: str, device: str = "cpu", use_cache: bool = True):
+def _get_or_load_model(weights_path: str, device: str = "cpu", use_cache: bool = True, model_type: str = "car"):
     """Lädt oder holt das Modell aus dem Cache.
     
     Args:
         weights_path: Pfad zu den Modellgewichten.
         device: Gerät ('cpu' oder 'cuda').
         use_cache: Wenn True, wird das Modell gecacht und wiederverwendet.
+        model_type: Modelltyp ('car' oder 'butterfly').
         
     Returns:
         Tuple aus (model, cfg)
     """
     global _MODEL_CACHE
     
-    cache_key = (weights_path, device)
+    cache_key = (weights_path, device, model_type)
     
     if use_cache and cache_key in _MODEL_CACHE:
         logger.debug("Verwende gecachtes Modell")
         return _MODEL_CACHE[cache_key]
     
     # Modell neu laden
-    cfg = build_cfg_for_inference(device=device, weights_path=weights_path)
+    cfg = build_cfg_for_inference(device=device, weights_path=weights_path, model=model_type)
     
     # Logger nur einmal initialisieren und auf WARNING setzen um "Loading from..." zu unterdrücken
     if not logging.getLogger("detectron2").handlers:
@@ -235,6 +235,7 @@ def run_analysis(
     verbose: bool = True,
     num_queries: int = 300,
     use_model_cache: bool = True,
+    model_type: str = "car",
 ) -> pd.DataFrame:
     """Führt die vollständige LRP-Analyse durch.
     
@@ -256,6 +257,7 @@ def run_analysis(
         verbose: Ausführliche Logging-Ausgabe.
         num_queries: Anzahl der Decoder-Queries (Standard: 300 für MaskDINO).
         use_model_cache: Modell cachen für Wiederverwendung (spart ~10s bei mehreren Aufrufen).
+        model_type: Modelltyp ('car' oder 'butterfly').
         
     Returns:
         DataFrame mit den aggregierten Relevanzwerten.
@@ -278,10 +280,10 @@ def run_analysis(
     
     # Modell laden (mit Cache für Wiederverwendung)
     device = "cpu"
-    model, cfg = _get_or_load_model(chosen_weights, device=device, use_cache=use_model_cache)
+    model, cfg = _get_or_load_model(chosen_weights, device=device, use_cache=use_model_cache, model_type=model_type)
     
     # Metadata registrieren
-    _register_car_parts_metadata()
+    _register_model_metadata(model_type)
     
     # Determinismus
     _setup_determinism()
@@ -529,6 +531,7 @@ def main(
     verbose: bool = True,
     num_queries: int = 300,
     use_model_cache: bool = True,
+    model_type: str = "car",
 ) -> pd.DataFrame:
     """Programmierbarer Einstiegspunkt für LRP-Analyse.
     
@@ -553,6 +556,7 @@ def main(
         verbose: Ausführliches Logging.
         num_queries: Anzahl der Decoder-Queries (Standard: 300 für MaskDINO).
         use_model_cache: Modell cachen für schnellere wiederholte Aufrufe.
+        model_type: Modelltyp ('car' oder 'butterfly').
         
     Returns:
         DataFrame mit Relevanzwerten.
@@ -572,6 +576,7 @@ def main(
         verbose=verbose,
         num_queries=num_queries,
         use_model_cache=use_model_cache,
+        model_type=model_type,
     )
 
 

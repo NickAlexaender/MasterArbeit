@@ -10,6 +10,9 @@ import sys
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog  # Imported for potential dataset metadata wiring
 
+# Import der zentralen Modell-Konfiguration
+from myThesis.model_config import get_model_config, get_num_classes, get_dataset_name
+
 # Make MaskDINO importable (as in original script)
 MASKDINO_PATH = "/Users/nicklehmacher/Alles/MasterArbeit/MaskDINO"
 if MASKDINO_PATH not in sys.path:
@@ -22,7 +25,8 @@ except Exception as e:  # pragma: no cover - defensive
         f"MaskDINO konnte nicht importiert werden: {e}. Prüfe Pfad {MASKDINO_PATH}"
     )
 
-# Standardmäßig die finetuneten Gewichte mit 23 Klassen verwenden, um Shape-Mismatches zu vermeiden
+# Standardmäßig die finetuneten Gewichte verwenden, um Shape-Mismatches zu vermeiden
+# HINWEIS: Die NUM_CLASSES werden jetzt dynamisch über model_config.py gesetzt
 FINETUNED_WEIGHTS = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_final.pth"
 COCO_WEIGHTS_FALLBACK = (
     "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/weights/"
@@ -37,12 +41,20 @@ if not os.path.exists(DEFAULT_WEIGHTS):  # pragma: no cover - defensive
     DEFAULT_WEIGHTS = COCO_WEIGHTS_FALLBACK
 
 
-def build_cfg_for_inference(device: str = "cpu", weights_path: str | None = None):
+def build_cfg_for_inference(device: str = "cpu", weights_path: str | None = None, model: str = "car"):
     """Erzeuge eine Inferenz-Konfiguration, die mit den Gewichten kompatibel ist.
 
     Wir lehnen uns eng an myThesis/fine-tune.py an, aber nur mit den nötigen Schlüsseln
     für das Laden des Modells zur Inferenz.
+    
+    Args:
+        device: Gerät für Inferenz ("cpu" oder "cuda")
+        weights_path: Pfad zu den Modell-Gewichten
+        model: Modellname ("car" oder "butterfly")
     """
+    num_classes = get_num_classes(model)
+    dataset_name = get_dataset_name(model)
+    
     cfg = get_cfg()
     add_maskdino_config(cfg)
 
@@ -67,7 +79,7 @@ def build_cfg_for_inference(device: str = "cpu", weights_path: str | None = None
     # SemSeg-Head / MaskDINO Head
     cfg.MODEL.SEM_SEG_HEAD.NAME = "MaskDINOHead"
     cfg.MODEL.SEM_SEG_HEAD.IGNORE_VALUE = 255
-    cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 23
+    cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = num_classes
     cfg.MODEL.SEM_SEG_HEAD.LOSS_WEIGHT = 1.0
     cfg.MODEL.SEM_SEG_HEAD.CONVS_DIM = 256
     cfg.MODEL.SEM_SEG_HEAD.MASK_DIM = 256
@@ -129,6 +141,6 @@ def build_cfg_for_inference(device: str = "cpu", weights_path: str | None = None
     cfg.MODEL.DEVICE = device
 
     # Minimal-Datasets (werden registriert, bevor das Model gebaut wird)
-    cfg.DATASETS.TRAIN = ("car_parts_minimal",)
-    cfg.DATASETS.TEST = ("car_parts_minimal",)
+    cfg.DATASETS.TRAIN = (f"{dataset_name}_minimal",)
+    cfg.DATASETS.TEST = (f"{dataset_name}_minimal",)
     return cfg
