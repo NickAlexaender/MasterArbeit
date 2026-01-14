@@ -515,12 +515,11 @@ def process_dataset(dataset_name, base_path):
     input_dir = os.path.join(base_path, "1images")
     base_output_dir = base_path
     
-    # Alle Farbordner
-    color_folders = ['blau', 'braun', 'cyan', 'gelb', 'grau', 'grün', 'lila', 
-                     'orange', 'pink', 'rot', 'schwarz', 'weiss']
+    # Nur diese Farben werden als Masken ausgegeben
+    output_colors = ['grau', 'orange', 'schwarz']
     
-    # Erstelle alle Ausgabeordner falls nicht vorhanden
-    for color_folder in color_folders:
+    # Erstelle nur die benötigten Ausgabeordner
+    for color_folder in output_colors:
         os.makedirs(os.path.join(base_output_dir, color_folder), exist_ok=True)
     
     # Finde alle Bilder im Input-Ordner
@@ -559,20 +558,11 @@ def process_dataset(dataset_name, base_path):
             # Alle Farbmasken extrahieren (exklusiv)
             extracted_masks = extract_all_color_masks_exclusive(input_image_path, temp_output_dir)
             
-            # Verschiebe jede Maske in den entsprechenden Farbordner
-            # Mapping von internen Farbnamen zu Ordnernamen
+            # Verschiebe nur ausgewählte Masken in den entsprechenden Farbordner
+            # Mapping von internen Farbnamen zu Ordnernamen (nur für gewünschte Farben)
             color_mapping = {
-                'rot': 'rot',
-                'gruen': 'grün',
-                'blau': 'blau',
-                'gelb': 'gelb',
                 'orange': 'orange',
-                'lila': 'lila',
-                'cyan': 'cyan',
-                'pink': 'pink',
-                'braun': 'braun',
                 'schwarz': 'schwarz',
-                'weiss': 'weiss',
                 'grau': 'grau'
             }
             

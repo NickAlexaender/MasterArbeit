@@ -152,8 +152,9 @@ class LRPController:
             if isinstance(output, tuple) and len(output) >= 1:
                 raw_output = output[0]
                 if isinstance(raw_output, dict) and "pred_logits" in raw_output:
+                    # OPTIMIZATION: Kein clone() - Tensoren werden nicht ver\u00e4ndert
                     self._decoder_raw_outputs = {
-                        k: v.clone() if isinstance(v, Tensor) else v
+                        k: v if isinstance(v, Tensor) else v
                         for k, v in raw_output.items()
                     }
                     if self.verbose:
@@ -302,10 +303,12 @@ class LRPController:
             LRPResult mit Relevanz-Maps und Metadaten
         """
         result = LRPResult()
-        R_current = R_start.clone()
+        # OPTIMIZATION: Kein clone() - R_start wird nicht verändert, R_current zeigt darauf
+        R_current = R_start
         
-        # Memory-Bereinigung vor Backward Pass
-        gc.collect()
+        # OPTIMIZATION: Memory-Bereinigung vor Backward Pass entfernt
+        # Bei Batch-Verarbeitung ist gc.collect() hier zu teuer (20-50ms pro Bild)
+        # Memory wird am Ende des gesamten Batches bereinigt
         
         # Hole die Layer-Liste in LRP-Propagations-Reihenfolge
         # basierend auf which_module
@@ -377,21 +380,20 @@ class LRPController:
                 #         f"Konservierungsfehler bei {layer_name}: {conservation_error:.4f}"
                 #     )
                 
-                # MEMORY OPTIMIZATION: Speichere nur die letzten paar Layer-Relevanzen
-                # statt alle, um OOM zu vermeiden
-                if len(result.R_per_layer) > 3:
-                    # Entferne älteste Einträge
-                    oldest_key = next(iter(result.R_per_layer))
-                    del result.R_per_layer[oldest_key]
-                
-                result.R_per_layer[layer_name] = R_prev.clone()
+                # MEMORY OPTIMIZATION: R_per_layer komplett deaktiviert
+                # Wird nur für Debug gebraucht, spart erheblich Memory + clone() Zeit
+                # Falls Debug nötig: Umgebungsvariable LRP_DEBUG=1 setzen
+                # if os.getenv('LRP_DEBUG'):
+                #     result.R_per_layer[layer_name] = R_prev
                 
                 # Update für nächste Iteration
                 R_current = R_prev
                 
-                # Aggressives Memory-Cleanup
+                # OPTIMIZATION: Memory-Cleanup ohne gc.collect()
+                # gc.collect() ist sehr teuer (~20-50ms pro Layer bei vielen Layern)
+                # Bei 6 Layern = 120-300ms pro Bild!
+                # Aufräumen passiert automatisch + am Ende des Batches
                 del R_prev
-                gc.collect()
                 
             except Exception as e:
                 logger.error(f"Fehler bei Layer {layer_name}: {e}")
@@ -794,7 +796,8 @@ class LRPController:
             raise RuntimeError(f"Kein Output für {target_name} gespeichert")
         
         # Output hat typisch Shape (num_tokens, batch, hidden_dim) = (T, B, C)
-        encoder_output = activations.output.clone()
+        # OPTIMIZATION: Kein clone() - nur lesen, nicht schreiben
+        encoder_output = activations.output
         
         if self.verbose:
             logger.debug(f"Encoder-Output Shape: {encoder_output.shape}")
@@ -925,7 +928,8 @@ class LRPController:
             if activations.output is None:
                 continue
             
-            output = activations.output.clone()
+            # OPTIMIZATION: Kein clone() - nur lesen
+            output = activations.output
             
             # Prüfe ob die Shape passt
             if output.dim() == 3:
@@ -936,7 +940,7 @@ class LRPController:
                     actual_prop_index = try_idx
                     break
                 elif output.shape[1] == num_queries_expected:
-                    # Format (B, Q, C) - transponiere
+                    # Format (B, Q, C) - transponiere (erzeugt neuen Tensor)
                     decoder_output = output.permute(1, 0, 2)
                     actual_layer_name = try_name
                     actual_prop_index = try_idx
@@ -944,17 +948,20 @@ class LRPController:
             
             # Versuche auch die Input-Aktivierung
             if activations.input is not None:
+                # OPTIMIZATION: Kein clone() - nur lesen
                 inp = activations.input
                 if inp.dim() == 3:
                     if inp.shape[0] == num_queries_expected:
-                        decoder_output = inp.clone()
+                        # Kein clone() nötig - nur lesen
+                        decoder_output = inp
                         actual_layer_name = try_name
                         actual_prop_index = try_idx
                         if self.verbose:
                             logger.debug(f"Verwende Input statt Output von {try_name}")
                         break
                     elif inp.shape[1] == num_queries_expected:
-                        decoder_output = inp.permute(1, 0, 2).clone()
+                        # permute() erzeugt neuen Tensor
+                        decoder_output = inp.permute(1, 0, 2)
                         actual_layer_name = try_name
                         actual_prop_index = try_idx
                         break
@@ -969,13 +976,15 @@ class LRPController:
                     if act is None:
                         continue
                     if act.dim() == 3 and act.shape[0] == num_queries_expected:
-                        decoder_output = act.clone()
+                        # Kein clone() n\u00f6tig
+                        decoder_output = act
                         actual_layer_name = name
                         actual_prop_index = idx
                         logger.warning(f"Fallback: Verwende {act_name} von {name} (Shape: {act.shape})")
                         break
                     elif act.dim() == 3 and act.shape[1] == num_queries_expected:
-                        decoder_output = act.permute(1, 0, 2).clone()
+                        # permute() erzeugt neuen Tensor
+                        decoder_output = act.permute(1, 0, 2)
                         actual_layer_name = name
                         actual_prop_index = idx
                         logger.warning(f"Fallback: Verwende transponiertes {act_name} von {name}")

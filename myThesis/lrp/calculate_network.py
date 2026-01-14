@@ -181,6 +181,46 @@ def print_summary(rows: List[TopFeature]) -> None:
 		print(f"{r.module:7s} | L{r.layer_idx:02d} | F{r.feature_idx:03d} | {r.miou:.6f}")
 
 
+def _get_existing_features(
+	lrp_encoder_dir: str,
+	lrp_decoder_dir: str,
+) -> set:
+	"""Get set of (module, layer_idx, feature_idx) tuples for already-computed features."""
+	existing = set()
+	
+	# Check encoder directory
+	if os.path.isdir(lrp_encoder_dir):
+		for fname in os.listdir(lrp_encoder_dir):
+			if fname.startswith("._"):  # Skip macOS metadata files
+				continue
+			if fname.endswith(".csv") and fname.startswith("layer"):
+				try:
+					# Parse "layer{layer_idx}_feat{feature_idx}.csv"
+					parts = fname.replace(".csv", "").split("_")
+					layer_idx = int(parts[0].replace("layer", ""))
+					feature_idx = int(parts[1].replace("feat", ""))
+					existing.add(("encoder", layer_idx, feature_idx))
+				except Exception:
+					continue
+	
+	# Check decoder directory
+	if os.path.isdir(lrp_decoder_dir):
+		for fname in os.listdir(lrp_decoder_dir):
+			if fname.startswith("._"):  # Skip macOS metadata files
+				continue
+			if fname.endswith(".csv") and fname.startswith("layer"):
+				try:
+					# Parse "layer{layer_idx}_feat{feature_idx}.csv"
+					parts = fname.replace(".csv", "").split("_")
+					layer_idx = int(parts[0].replace("layer", ""))
+					feature_idx = int(parts[1].replace("feat", ""))
+					existing.add(("decoder", layer_idx, feature_idx))
+				except Exception:
+					continue
+	
+	return existing
+
+
 def run_lrp_for(
 	rows: List[TopFeature],
 	*,
@@ -200,9 +240,27 @@ def run_lrp_for(
 	os.makedirs(lrp_encoder_dir, exist_ok=True)
 	os.makedirs(lrp_decoder_dir, exist_ok=True)
 
-	for i, r in enumerate(rows):
+	# Check which features already exist
+	existing_features = _get_existing_features(lrp_encoder_dir, lrp_decoder_dir)
+	to_process = [
+		(r, i) for i, r in enumerate(rows)
+		if (r.module, r.layer_idx, r.feature_idx) not in existing_features
+	]
+	
+	if not to_process:
+		print("✅ Alle Features sind bereits berechnet!")
+		return
+	
+	skipped_count = len(rows) - len(to_process)
+	if skipped_count > 0:
+		print(f"⏭️  {skipped_count} Features überspringen (bereits berechnet)")
+		print(f"📊 Verarbeite {len(to_process)} neue Features...\n")
+
+	for i, (r, orig_idx) in enumerate(to_process):
 		# calc_lrp.main expects 1-based layer index; our CSV layers are 0-based
 		layer_1based = r.layer_idx + 1
+		# CSV feature_idx is 1-based (1-256), but LRP expects 0-based indices (0-255)
+		feature_0based = r.feature_idx - 1
 		which_module = r.module
 		if which_module == "encoder":
 			out_csv = os.path.join(lrp_encoder_dir, f"layer{r.layer_idx}_feat{r.feature_idx}.csv")
@@ -213,7 +271,7 @@ def run_lrp_for(
 		calc_lrp.main(
 			images_dir=images_dir,
 			layer_index=layer_1based,
-			feature_index=r.feature_idx,
+			feature_index=feature_0based,
 			which_module=which_module,
 			output_csv=out_csv,
 			weights_path=weights_path,
@@ -228,8 +286,9 @@ def run_lrp_for(
 		if torch.cuda.is_available():
 			torch.cuda.empty_cache()
 		
-		# Progress indicator
-		print(f"✅ LRP {i+1}/{len(rows)} abgeschlossen: {which_module} L{r.layer_idx} F{r.feature_idx}")
+		# Progress indicator (show progress within to_process)
+		total_new = len(to_process)
+		print(f"✅ LRP {i+1}/{total_new} abgeschlossen: {r.module} L{r.layer_idx} F{feature_0based}")
 
 
 def main(

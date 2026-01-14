@@ -12,6 +12,9 @@ import yaml
 from datetime import datetime
 import random
 
+# Target (width, height) for all resized images and masks
+TARGET_SIZE = (256, 256)
+
 def analyze_dataset_structure():
     """Analysiert die YOLOv8-Dataset-Struktur"""
     
@@ -104,6 +107,8 @@ def yolo_to_coco_converter():
     """Konvertiert YOLOv8-Format zu COCO-Format"""
     
     dataset_root = Path("/Users/nicklehmacher/Alles/MasterArbeit/ultralytics/datasets")
+    resized_images_root = dataset_root / "images_256"
+    resized_images_root.mkdir(parents=True, exist_ok=True)
     
     print("\n🔄 Starting YOLOv8 to COCO conversion...")
     print("=" * 50)
@@ -263,18 +268,24 @@ def yolo_to_coco_converter():
                 if img is None:
                     print(f"   ⚠️  Skipping {img_path.name}: Could not load image")
                     continue
-                
-                height, width = img.shape[:2]
-                
-                # Bestimme relativen Pfad für file_name
-                # Finde den relativen Pfad vom images-Verzeichnis aus
+
+                # Resize image to uniform target size and persist copy
+                resized_img = cv2.resize(img, TARGET_SIZE, interpolation=cv2.INTER_LINEAR)
+                height, width = resized_img.shape[:2]
+
                 images_root = dataset_root / "images"
                 try:
                     relative_path = img_path.relative_to(images_root)
-                    file_name = str(relative_path).replace("\\", "/")  # Für Windows-Kompatibilität
                 except ValueError:
                     # Falls Bild nicht im images-Verzeichnis, verwende nur Dateinamen
-                    file_name = img_path.name
+                    relative_path = Path(img_path.name)
+
+                save_path = resized_images_root / relative_path
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(save_path), resized_img)
+
+                # file_name im COCO-JSON zeigt auf die 256x256-Variante
+                file_name = str(save_path.relative_to(dataset_root)).replace("\\", "/")
                 
                 # Füge Bild zur COCO-Struktur hinzu
                 coco_data["images"].append({
@@ -483,9 +494,13 @@ def verify_coco_conversion():
             
             # Suche Bild in verschiedenen Verzeichnissen
             possible_image_paths = [
+                    dataset_root / image_name,
+                    dataset_root / 'images_256' / image_name,
                 dataset_root / 'images' / 'train' / image_name,
                 dataset_root / 'images' / 'val' / image_name,
-                dataset_root / 'images' / image_name,
+                    dataset_root / 'images' / image_name,
+                    dataset_root / 'images_256' / 'train' / image_name,
+                    dataset_root / 'images_256' / 'val' / image_name,
             ]
             
             image_found = False

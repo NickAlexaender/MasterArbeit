@@ -226,12 +226,12 @@ def setup_config(model_type="pretrained", dataset_type="car_parts"):
     cfg.MODEL.MaskDINO.TEST.OBJECT_MASK_THRESHOLD = 0.25  # Entspricht YAML (0.25 statt 0.8)
     cfg.MODEL.MaskDINO.TEST.SCORE_THRESH_TEST = 0.25  # Niedrigere Schwelle für bessere Detektion
     
-    # Input-Format - EXAKT wie in test_maskdino.py
+    # Input-Format - Angepasst für 256x256 Eingabebilder
     cfg.INPUT.FORMAT = "RGB"
-    cfg.INPUT.MIN_SIZE_TRAIN = (800,)
-    cfg.INPUT.MAX_SIZE_TRAIN = 1333
-    cfg.INPUT.MIN_SIZE_TEST = 800
-    cfg.INPUT.MAX_SIZE_TEST = 1333
+    cfg.INPUT.MIN_SIZE_TRAIN = (256,)
+    cfg.INPUT.MAX_SIZE_TRAIN = 256
+    cfg.INPUT.MIN_SIZE_TEST = 256
+    cfg.INPUT.MAX_SIZE_TEST = 256
     
     cfg.MODEL.DEVICE = "cpu"  # CPU-only
     
@@ -367,7 +367,7 @@ def main():
         },
         "butterfly": {
             "finetune_folder": os.path.join(base_output_dir, "butterfly_parts_finetune"),
-            "test_image": "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/butterfly/1images/0010005.png",
+            "test_image": "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/butterfly/1images/0010011.png",
             "register_func": register_butterfly_datasets,
             "num_classes": 10,
             "metadata_name": "butterfly_val"

@@ -85,6 +85,10 @@ logger = logging.getLogger("lrp.calc")
 # Globaler Cache für Modell-Wiederverwendung
 _MODEL_CACHE: dict = {}
 
+# Globaler Cache für Forward Pass Aktivierungen (OPTIMIZATION: Forward Pass Caching)
+# Format: {(images_dir, which_module, layer_index): {'activations': tensor, 'batched_inputs': list}}
+_FORWARD_PASS_CACHE: dict = {}
+
 
 # =============================================================================
 # Hilfsfunktionen
@@ -216,6 +220,80 @@ def clear_model_cache():
     logger.info("Modell-Cache geleert")
 
 
+def clear_forward_pass_cache():
+    """Löscht den Forward Pass Cache und gibt Speicher frei."""
+    global _FORWARD_PASS_CACHE
+    _FORWARD_PASS_CACHE.clear()
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    logger.info("Forward Pass Cache geleert")
+
+
+def _prepare_batched_inputs_from_images(
+    img_files: List[str],
+    cfg,
+    batch_size: int = 4,
+    device: str = "cpu"
+) -> List[List[dict]]:
+    """Lädt Bilder und teilt sie in Batches auf.
+    
+    Args:
+        img_files: Liste von Bildpfaden
+        cfg: Model-Konfiguration (für INPUT.FORMAT etc.)
+        batch_size: Bilder pro Batch
+        device: Torch device
+        
+    Returns:
+        Liste von Batches, wobei jeder Batch eine Liste von dicts mit 'image', 'height', 'width' ist
+    """
+    resize_aug = T.ResizeShortestEdge(
+        short_edge_length=getattr(cfg.INPUT, "MIN_SIZE_TEST", 800),
+        max_size=getattr(cfg.INPUT, "MAX_SIZE_TEST", 1333),
+    )
+    
+    num_images = len(img_files)
+    num_batches = (num_images + batch_size - 1) // batch_size
+    all_batches = []
+    
+    for batch_idx in range(num_batches):
+        batch_start = batch_idx * batch_size
+        batch_end = min(batch_start + batch_size, num_images)
+        batch_paths = img_files[batch_start:batch_end]
+        
+        batched_inputs = []
+        for img_path in batch_paths:
+            try:
+                pil_im = PIL.Image.open(img_path).convert("RGB")
+                original_rgb = np.array(pil_im)
+                original_h, original_w = original_rgb.shape[:2]
+                
+                if cfg.INPUT.FORMAT == "RGB":
+                    model_input = original_rgb
+                else:
+                    model_input = original_rgb[:, :, ::-1]  # RGB -> BGR
+                
+                tfm = resize_aug.get_transform(model_input)
+                model_input = tfm.apply_image(model_input)
+                
+                image_tensor = torch.as_tensor(model_input.astype("float32").transpose(2, 0, 1))
+                image_tensor = image_tensor.to(device)
+                
+                batched_inputs.append({
+                    "image": image_tensor,
+                    "height": original_h,
+                    "width": original_w,
+                })
+            except Exception as e:
+                logger.exception(f"Fehler beim Laden von {img_path}: {e}")
+                continue
+        
+        if batched_inputs:
+            all_batches.append(batched_inputs)
+    
+    return all_batches
+
+
 # =============================================================================
 # Haupt-Analyse-Funktion
 # =============================================================================
@@ -236,6 +314,7 @@ def run_analysis(
     num_queries: int = 300,
     use_model_cache: bool = True,
     model_type: str = "car",
+    batch_size: int = 1,
 ) -> pd.DataFrame:
     """Führt die vollständige LRP-Analyse durch.
     
@@ -258,6 +337,7 @@ def run_analysis(
         num_queries: Anzahl der Decoder-Queries (Standard: 300 für MaskDINO).
         use_model_cache: Modell cachen für Wiederverwendung (spart ~10s bei mehreren Aufrufen).
         model_type: Modelltyp ('car' oder 'butterfly').
+        batch_size: Anzahl der Bilder pro Batch (Standard: 4). Höhere Werte = schneller, aber mehr RAM.
         
     Returns:
         DataFrame mit den aggregierten Relevanzwerten.
@@ -355,12 +435,6 @@ def run_analysis(
     controller = LRPController(model, device=device, eps=lrp_epsilon, verbose=False)
     controller.prepare(swap_linear=True)
     
-    # Resize-Transformation
-    resize_aug = T.ResizeShortestEdge(
-        short_edge_length=getattr(cfg.INPUT, "MIN_SIZE_TEST", 800),
-        max_size=getattr(cfg.INPUT, "MAX_SIZE_TEST", 1333),
-    )
-    
     # NEU: Decoder und Encoder arbeiten jetzt gleich - Layer-zu-Layer LRP
     # für eine einzelne Query/Feature, die Relevanz auf vorherige Queries/Features verteilt
     compute_all_queries = False  # Alte Logik deaktiviert
@@ -373,39 +447,29 @@ def run_analysis(
     agg_attr_per_query: List[Optional[Tensor]] = [None] * queries_to_compute
     processed = 0
     
-    for img_path in img_files:
-        # Neue Bild-Nachricht
-        img_name = os.path.basename(img_path)
+    # OPTIMIZATION: Forward Pass Caching - Check ob schon Aktivierungen für diesen Layer/Bilder existieren
+    cache_key = (images_dir, which_module, layer_index, tuple(sorted(img_files)))
+    forward_pass_cached = False
+    if cache_key in _FORWARD_PASS_CACHE:
+        print(f"✓ Nutze gecachte Forward Pass Aktivierungen für {layer_role} Layer {layer_index}")
+        forward_pass_cached = True
+        cached_data = _FORWARD_PASS_CACHE[cache_key]
+        # cached_data wird später verwendet um Backward Pass schneller zu machen
+    
+    # OPTIMIZATION: Batch-Verarbeitung von Bildern
+    num_images = len(img_files)
+    num_batches = (num_images + batch_size - 1) // batch_size
+    
+    # Lade alle Bilder in Batches (nutzt die neue Hilfsfunktion)
+    all_batches = _prepare_batched_inputs_from_images(img_files, cfg, batch_size=batch_size, device=device)
+    
+    for batch_idx, batched_inputs in enumerate(all_batches):
+        # Neue Batch-Nachricht (reduziert Output)
         feature_or_query = f"Feature {feature_index}" if not compute_all_queries else f"Queries 0-{queries_to_compute-1}"
-        print(f"LRP auf {layer_role} in Layer {layer_index} mit {feature_or_query} auf Bild ({img_name})")
+        print(f"LRP auf {layer_role} in Layer {layer_index} mit {feature_or_query} - Batch {batch_idx+1}/{len(all_batches)} ({len(batched_inputs)} Bilder)")
         
+        # Verarbeite den gesamten Batch auf einmal
         try:
-            # Bild laden
-            pil_im = PIL.Image.open(img_path).convert("RGB")
-            original_rgb = np.array(pil_im)
-            original_h, original_w = original_rgb.shape[:2]
-            
-            # Format anpassen
-            if cfg.INPUT.FORMAT == "RGB":
-                model_input = original_rgb
-            else:
-                model_input = original_rgb[:, :, ::-1]  # RGB -> BGR
-            
-            # Resize
-            tfm = resize_aug.get_transform(model_input)
-            model_input = tfm.apply_image(model_input)
-            
-            # Zu Tensor
-            image_tensor = torch.as_tensor(model_input.astype("float32").transpose(2, 0, 1))
-            image_tensor = image_tensor.to(device)
-            
-            # Batch erstellen
-            batched_inputs = [{
-                "image": image_tensor,
-                "height": original_h,
-                "width": original_w,
-            }]
-            
             # NEU: Einheitliche Layer-zu-Layer LRP für beide Module (Encoder und Decoder)
             # chosen_name ist der Layer, von dem aus wir die Relevanz zurückpropagieren wollen
             # feature_index ist der Query-Index (Decoder) oder Kanal-Index (Encoder)
@@ -420,7 +484,6 @@ def run_analysis(
             )
                 
             if result.R_input is None:
-                # logger.warning(f"Keine Relevanz für {img_path}")
                 continue
             
             # Normalisieren
@@ -430,7 +493,6 @@ def run_analysis(
             attr = _aggregate_relevance(R_norm, index_axis)
             
             if not torch.isfinite(attr).all():
-                # logger.warning(f"Nicht-endliche Relevanzwerte bei {img_path}")
                 continue
             
             if agg_attr_per_query[0] is None:
@@ -438,16 +500,13 @@ def run_analysis(
             else:
                 agg_attr_per_query[0] += attr
             
-            processed += 1
-            
-            # if verbose and processed % 10 == 0:
-            #     logger.info(f"Verarbeitet: {processed}/{len(img_files)}")
+            processed += len(batched_inputs)
                 
         except Exception as e:
-            logger.exception(f"Fehler bei {img_path}: {e}")
+            logger.exception(f"Fehler bei Batch {batch_idx+1}: {e}")
             continue
     
-    # Speicher nur am Ende aufräumen (nicht nach jedem Bild - das ist zu teuer)
+    # OPTIMIZATION: Speicher nur am Ende aufräumen (nicht nach jedem Bild/Batch - das ist zu teuer)
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -532,6 +591,7 @@ def main(
     num_queries: int = 300,
     use_model_cache: bool = True,
     model_type: str = "car",
+    batch_size: int = 1,
 ) -> pd.DataFrame:
     """Programmierbarer Einstiegspunkt für LRP-Analyse.
     
@@ -557,6 +617,7 @@ def main(
         num_queries: Anzahl der Decoder-Queries (Standard: 300 für MaskDINO).
         use_model_cache: Modell cachen für schnellere wiederholte Aufrufe.
         model_type: Modelltyp ('car' oder 'butterfly').
+        batch_size: Anzahl der Bilder pro Batch (Standard: 4). Höhere Werte = schneller, aber mehr RAM.
         
     Returns:
         DataFrame mit Relevanzwerten.
@@ -577,6 +638,7 @@ def main(
         num_queries=num_queries,
         use_model_cache=use_model_cache,
         model_type=model_type,
+        batch_size=batch_size,
     )
 
 

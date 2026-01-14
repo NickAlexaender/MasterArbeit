@@ -131,8 +131,9 @@ def build_cfg_for_inference(device: str = "cpu", weights_path: str | None = None
 
     # Inputformat für Predictor
     cfg.INPUT.FORMAT = "RGB"
-    cfg.INPUT.MIN_SIZE_TEST = 800
-    cfg.INPUT.MAX_SIZE_TEST = 1333
+    # Angepasst für 256x256 Eingabebilder (keine Skalierung nötig)
+    cfg.INPUT.MIN_SIZE_TEST = 256
+    cfg.INPUT.MAX_SIZE_TEST = 256
 
     # Geräte/Weg
     # Erlaube optionales Überschreiben des Gewichts-Pfads

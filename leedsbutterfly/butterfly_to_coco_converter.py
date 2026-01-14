@@ -164,12 +164,88 @@ def analyze_dataset():
     return images, seg_dir
 
 
-def convert_to_coco(train_ratio=0.8, use_polygons=True):
+def resize_images_to_square(target_size=256):
+    """
+    Schneidet alle Bilder und Masken quadratisch zu (zentriert) und skaliert auf target_size x target_size.
+    Überschreibt die originalen Dateien.
+    
+    Args:
+        target_size: Zielgröße in Pixeln (Standard: 256)
+    """
+    dataset_root = Path(__file__).parent
+    images_dir = dataset_root / "images"
+    seg_dir = dataset_root / "segmentations"
+    
+    print(f"\n🔄 RESIZING IMAGES TO {target_size}x{target_size}")
+    print("=" * 50)
+    
+    # Sammle alle Bilder
+    images = sorted(list(images_dir.glob("*.png")))
+    print(f"📊 Found {len(images)} images to process")
+    
+    processed = 0
+    errors = 0
+    
+    for img_path in images:
+        try:
+            # Lade Bild
+            img = cv2.imread(str(img_path))
+            if img is None:
+                print(f"   ⚠️ Could not load: {img_path.name}")
+                errors += 1
+                continue
+            
+            # Lade zugehörige Segmentierungsmaske
+            seg_path = seg_dir / f"{img_path.stem}_seg0.png"
+            mask = cv2.imread(str(seg_path), cv2.IMREAD_GRAYSCALE) if seg_path.exists() else None
+            
+            h, w = img.shape[:2]
+            
+            # Quadratisch zuschneiden (zentriert)
+            if h != w:
+                min_dim = min(h, w)
+                # Zentrierter Ausschnitt
+                start_x = (w - min_dim) // 2
+                start_y = (h - min_dim) // 2
+                
+                img = img[start_y:start_y + min_dim, start_x:start_x + min_dim]
+                if mask is not None:
+                    mask = mask[start_y:start_y + min_dim, start_x:start_x + min_dim]
+            
+            # Auf Zielgröße skalieren
+            img_resized = cv2.resize(img, (target_size, target_size), interpolation=cv2.INTER_AREA)
+            
+            # Speichere Bild (überschreibt Original)
+            cv2.imwrite(str(img_path), img_resized)
+            
+            # Speichere Maske (überschreibt Original)
+            if mask is not None:
+                mask_resized = cv2.resize(mask, (target_size, target_size), interpolation=cv2.INTER_NEAREST)
+                cv2.imwrite(str(seg_path), mask_resized)
+            
+            processed += 1
+            
+            if processed % 100 == 0:
+                print(f"   ✅ Processed {processed}/{len(images)} images...")
+                
+        except Exception as e:
+            print(f"   ❌ Error processing {img_path.name}: {e}")
+            errors += 1
+    
+    print(f"\n✅ Resizing complete!")
+    print(f"   Processed: {processed}")
+    print(f"   Errors: {errors}")
+    print(f"   New size: {target_size}x{target_size}")
+    
+    return processed > 0
+
+
+def convert_to_coco(val_per_category=10, use_polygons=True):
     """
     Konvertiert Leeds Butterfly Dataset zu COCO Format.
     
     Args:
-        train_ratio: Anteil der Trainingsdaten (Standard: 80%)
+        val_per_category: Anzahl der Bilder pro Kategorie im Validation Set (Standard: 10)
         use_polygons: Wenn True, werden Polygone verwendet; sonst RLE
     """
     
@@ -184,18 +260,21 @@ def convert_to_coco(train_ratio=0.8, use_polygons=True):
     # Erstelle Output-Verzeichnis
     output_dir.mkdir(exist_ok=True)
     
-    # Sammle alle Bild-Segmentierungs-Paare
-    all_pairs = []
+    # Sammle alle Bild-Segmentierungs-Paare und gruppiere nach Kategorie
+    pairs_by_category = {cat_id: [] for cat_id in BUTTERFLY_CATEGORIES.keys()}
     images = sorted(list(images_dir.glob("*.png")))
     
     for img_path in images:
         seg_path = seg_dir / f"{img_path.stem}_seg0.png"
         if seg_path.exists():
-            all_pairs.append((img_path, seg_path))
+            cat_id = img_path.stem[:3]  # Kategorie aus Dateinamen (z.B. "001")
+            if cat_id in pairs_by_category:
+                pairs_by_category[cat_id].append((img_path, seg_path))
     
-    print(f"📊 Found {len(all_pairs)} valid image-segmentation pairs")
+    total_pairs = sum(len(pairs) for pairs in pairs_by_category.values())
+    print(f"📊 Found {total_pairs} valid image-segmentation pairs")
     
-    if not all_pairs:
+    if total_pairs == 0:
         print("❌ No valid pairs found!")
         return False
     
@@ -208,14 +287,33 @@ def convert_to_coco(train_ratio=0.8, use_polygons=True):
             "supercategory": "butterfly"
         })
     
-    # Shuffle und Split
+    # Stratifizierter Split: val_per_category Bilder pro Kategorie für Validation
     random.seed(42)
-    random.shuffle(all_pairs)
     
-    train_split = int(train_ratio * len(all_pairs))
+    val_pairs = []
+    train_pairs = []
+    
+    print(f"\n📊 Stratified split ({val_per_category} images per category for validation):")
+    for cat_id in sorted(pairs_by_category.keys()):
+        cat_pairs = pairs_by_category[cat_id]
+        random.shuffle(cat_pairs)
+        
+        # Stelle sicher, dass genug Bilder vorhanden sind
+        val_count_for_cat = min(val_per_category, len(cat_pairs))
+        
+        val_pairs.extend(cat_pairs[:val_count_for_cat])
+        train_pairs.extend(cat_pairs[val_count_for_cat:])
+        
+        cat_name = BUTTERFLY_CATEGORIES[cat_id]
+        print(f"   {cat_id} ({cat_name}): {val_count_for_cat} val, {len(cat_pairs) - val_count_for_cat} train")
+    
+    # Shuffle die finalen Listen für bessere Durchmischung
+    random.shuffle(val_pairs)
+    random.shuffle(train_pairs)
+    
     splits = {
-        "train": all_pairs[:train_split],
-        "val": all_pairs[train_split:]
+        "train": train_pairs,
+        "val": val_pairs
     }
     
     print(f"📊 Split: {len(splits['train'])} train, {len(splits['val'])} val")
@@ -497,23 +595,28 @@ if __name__ == "__main__":
     print("=" * 60)
     print()
     
-    # Schritt 1: Analyse
-    print("STEP 1: Analyzing dataset")
+    # Schritt 1: Bilder auf 256x256 quadratisch zuschneiden
+    print("STEP 1: Resizing images to 256x256 square")
+    print("-" * 40)
+    resize_images_to_square(target_size=256)
+    
+    # Schritt 2: Analyse
+    print("\n\nSTEP 2: Analyzing dataset")
     print("-" * 40)
     analyze_dataset()
     
-    # Schritt 2: Konvertierung
-    print("\n\nSTEP 2: Converting to COCO format")
+    # Schritt 3: Konvertierung
+    print("\n\nSTEP 3: Converting to COCO format")
     print("-" * 40)
-    success = convert_to_coco(train_ratio=0.8, use_polygons=True)
+    success = convert_to_coco(val_per_category=10, use_polygons=True)
     
-    # Schritt 3: Verifikation
-    print("\n\nSTEP 3: Verifying conversion")
+    # Schritt 4: Verifikation
+    print("\n\nSTEP 4: Verifying conversion")
     print("-" * 40)
     verify_conversion()
     
-    # Schritt 4: MaskDINO-Struktur
-    print("\n\nSTEP 4: Creating MaskDINO-compatible structure")
+    # Schritt 5: MaskDINO-Struktur
+    print("\n\nSTEP 5: Creating MaskDINO-compatible structure")
     print("-" * 40)
     create_symlinks_for_maskdino()
     

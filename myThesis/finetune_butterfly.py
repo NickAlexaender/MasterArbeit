@@ -40,7 +40,7 @@ import yaml
 import tempfile
 import json
 from detectron2.config import get_cfg
-from detectron2.engine import DefaultTrainer, default_argument_parser, default_setup, hooks, launch
+from detectron2.engine import DefaultTrainer, default_argument_parser, default_setup, hooks, launch, HookBase
 from detectron2.utils.logger import setup_logger
 from detectron2.data import DatasetCatalog, MetadataCatalog, build_detection_train_loader, build_detection_test_loader
 from detectron2.data.datasets import register_coco_instances
@@ -66,6 +66,45 @@ except ImportError as e:
     print("   → Make sure MaskDINO is properly installed")
     print("   → Check if the path '/Users/nicklehmacher/Alles/MasterArbeit/MaskDINO' exists")
     sys.exit(1)
+
+
+class EarlyStoppingHook(HookBase):
+    """
+    Early Stopping Hook - stoppt Training wenn Loss nicht mehr sinkt
+    
+    Args:
+        patience: Anzahl Iterationen ohne Verbesserung bevor gestoppt wird
+        min_delta: Minimale Verbesserung die als Fortschritt zählt
+    """
+    def __init__(self, patience=300, min_delta=0.001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float('inf')
+        self.counter = 0
+        self.best_iter = 0
+        
+    def after_step(self):
+        # Hole aktuellen Loss aus dem Storage
+        storage = self.trainer.storage
+        try:
+            if storage.iter % 20 == 0:  # Nur alle 20 Iterationen prüfen
+                current_loss = storage.history("total_loss").latest()
+                
+                if current_loss < self.best_loss - self.min_delta:
+                    self.best_loss = current_loss
+                    self.counter = 0
+                    self.best_iter = self.trainer.iter
+                else:
+                    self.counter += 20
+                    
+                if self.counter >= self.patience:
+                    print(f"\n⚠️ Early Stopping ausgelöst nach {self.trainer.iter} Iterationen")
+                    print(f"   Bester Loss: {self.best_loss:.4f} bei Iteration {self.best_iter}")
+                    print(f"   Keine Verbesserung seit {self.patience} Iterationen")
+                    raise StopIteration("Early stopping triggered")
+        except (KeyError, AttributeError):
+            # Loss noch nicht verfügbar in frühen Iterationen
+            pass
 
 
 # Leeds Butterfly Dataset Klassen (10 Schmetterlingsarten)
@@ -104,11 +143,11 @@ class ButterflyTrainer(DefaultTrainer):
         from detectron2.data import transforms as T
         from detectron2.data.dataset_mapper import DatasetMapper
         
-        # Augmentations für Training
+        # Augmentations für Training (256x256)
         augmentations = [
             T.ResizeShortestEdge(
-                short_edge_length=cfg.INPUT.MIN_SIZE_TRAIN,
-                max_size=cfg.INPUT.MAX_SIZE_TRAIN,
+                short_edge_length=(256,),
+                max_size=256,
                 sample_style="choice"
             ),
             T.RandomFlip(),
@@ -215,13 +254,13 @@ def setup_config():
             'TEST': ("butterfly_val",)
         }
         
-        # Input-Einstellungen
+        # Input-Einstellungen (256x256)
         yaml_config['INPUT'] = {
             'FORMAT': 'RGB',
-            'MIN_SIZE_TRAIN': (800,),
-            'MAX_SIZE_TRAIN': 1333,
-            'MIN_SIZE_TEST': 800,
-            'MAX_SIZE_TEST': 1333
+            'MIN_SIZE_TRAIN': (256,),
+            'MAX_SIZE_TRAIN': 256,
+            'MIN_SIZE_TEST': 256,
+            'MAX_SIZE_TEST': 256
         }
         
         # Erstelle temporäre bereinigte Konfigurationsdatei
@@ -315,12 +354,12 @@ def setup_config():
     cfg.MODEL.MaskDINO.TEST.OBJECT_MASK_THRESHOLD = 0.25
     cfg.MODEL.MaskDINO.TEST.SCORE_THRESH_TEST = 0.5
     
-    # Input-Format
+    # Input-Format (256x256 für schnelleres Training)
     cfg.INPUT.FORMAT = "RGB"
-    cfg.INPUT.MIN_SIZE_TRAIN = (800,)
-    cfg.INPUT.MAX_SIZE_TRAIN = 1333
-    cfg.INPUT.MIN_SIZE_TEST = 800
-    cfg.INPUT.MAX_SIZE_TEST = 1333
+    cfg.INPUT.MIN_SIZE_TRAIN = (256,)
+    cfg.INPUT.MAX_SIZE_TRAIN = 256
+    cfg.INPUT.MIN_SIZE_TEST = 256
+    cfg.INPUT.MAX_SIZE_TEST = 256
     
     # Pre-trained weights vom funktionierenden Modell
     weights_path = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/weights/maskdino_r50_50ep_300q_hid1024_3sd1_instance_maskenhanced_mask46.1ap_box51.5ap.pth"
@@ -330,13 +369,13 @@ def setup_config():
     # Training-spezifische Parameter (für Fine-tuning angepasst)
     cfg.SOLVER.IMS_PER_BATCH = 1  # Sehr kleine Batch Size für CPU
     cfg.SOLVER.BASE_LR = 0.00001  # Sehr niedrige Learning Rate für Fine-tuning
-    cfg.SOLVER.MAX_ITER = 1500  # Anzahl Training Iterationen
+    cfg.SOLVER.MAX_ITER = 15000  # Anzahl Training Iterationen
     cfg.SOLVER.STEPS = (1000, 1250)  # Learning rate decay steps
     cfg.SOLVER.GAMMA = 0.1  # Learning rate decay factor
-    cfg.SOLVER.WARMUP_ITERS = 250  # Warmup iterations -> 500
+    cfg.SOLVER.WARMUP_ITERS = 100  # Warmup iterations -> 500
     cfg.SOLVER.WARMUP_FACTOR = 0.001
     cfg.SOLVER.WEIGHT_DECAY = 0.0001
-    cfg.SOLVER.CHECKPOINT_PERIOD = 250  # Save checkpoint every 500 iterations -> 500
+    cfg.SOLVER.CHECKPOINT_PERIOD = 100  # Save checkpoint every 500 iterations -> 500
     
     # Evaluation
     # cfg.TEST.EVAL_PERIOD = 500  # Evaluate every 500 iterations
@@ -383,6 +422,7 @@ def main(args):
     # Add hooks for better monitoring (without evaluation to avoid OOM)
     trainer.register_hooks([
         hooks.PeriodicCheckpointer(trainer.checkpointer, cfg.SOLVER.CHECKPOINT_PERIOD),
+        EarlyStoppingHook(patience=300, min_delta=0.001),  # Early Stopping nach 300 Iterationen ohne Verbesserung
     ])
     
     print("🚀 Starting MaskDINO Fine-tuning for Leeds Butterfly Segmentation...")
