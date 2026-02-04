@@ -1,30 +1,4 @@
-"""
-MaskDINO Model Graph Wrapper für LRP-Analyse.
-
-Dieses Modul linearisiert die komplexe verschachtelte Struktur von Detectron2/MaskDINO
-Modellen in einen navigierbaren Graphen. Es erstellt ein gemapptes Dictionary von
-Layern und eine geordnete Liste für die Rückwärts-Iteration bei LRP.
-
-Komponenten:
-    - LayerNode: Datenklasse für einzelne Layer mit Metadaten und Abhängigkeiten
-    - LayerType: Enum für die Kategorisierung von Layern (Backbone, Encoder, Decoder)
-    - ModelGraph: Hauptklasse, die das Modell einmalig scannt und cached
-
-Der Graph ermöglicht:
-    - Effiziente Iteration durch die Layer in Forward- oder Rückwärts-Reihenfolge
-    - Korrektes Routing von Relevanz vom Transformer Decoder zu Pixel Decoder Features
-    - Zugriff auf LRP-fähige Module für die Aktivierungsspeicherung
-
-Example:
-    >>> from model_graph_wrapper import ModelGraph
-    >>> graph = ModelGraph(model, verbose=True)
-    >>> # Rückwärts-Iteration für LRP
-    >>> for node in graph.backward_order():
-    ...     if node.has_lrp_module:
-    ...         relevance = propagate_relevance(node.module, relevance)
-"""
 from __future__ import annotations
-
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import (
@@ -33,9 +7,7 @@ from typing import (
 )
 import re
 import warnings
-
 import torch.nn as nn
-
 from .param_patcher import (
     LRPModuleMixin,
     LRP_Linear,
@@ -46,13 +18,9 @@ from .param_patcher import (
 )
 
 
-# =============================================================================
-# Layer-Typen und Kategorisierung
-# =============================================================================
-
+# Kategorisierung von Layern in der MaskDINO-Architektur.
 
 class LayerType(Enum):
-    """Kategorisierung von Layern in der MaskDINO-Architektur."""
     
     BACKBONE = auto()           # ResNet, Swin, etc.
     PIXEL_DECODER = auto()      # FPN, DeformableDetrEncoder im Pixel-Decoder
@@ -63,7 +31,6 @@ class LayerType(Enum):
     
     @classmethod
     def from_path(cls, path: str) -> 'LayerType':
-        """Bestimmt den LayerType anhand des Modul-Pfads."""
         lpath = path.lower()
         
         # HEAD zuerst prüfen - diese Module sind innerhalb des Decoders,
@@ -99,28 +66,10 @@ class LayerType(Enum):
         return cls.OTHER
 
 
-# =============================================================================
-# Layer-Node Datenstruktur
-# =============================================================================
-
+# wir repräsentieren einen einzelnen Layer im linearisierten Modell-Graphen.
 
 @dataclass
 class LayerNode:
-    """Repräsentiert einen einzelnen Layer im linearisierten Modell-Graphen.
-    
-    Attributes:
-        name: Vollständiger Pfadname des Moduls (z.B. 'sem_seg_head.pixel_decoder.transformer.encoder.layers.0')
-        module: Das PyTorch-Modul selbst
-        layer_type: Kategorisierung (BACKBONE, ENCODER, DECODER, etc.)
-        order_index: Position in der Vorwärts-Reihenfolge (0-basiert)
-        parent_name: Name des übergeordneten Moduls
-        is_attention: True wenn Attention-Layer (MHA, MSDeformAttn)
-        is_lrp_module: True wenn LRP-fähiges Modul (LRPModuleMixin)
-        
-        # Für LRP-Routing:
-        input_from: Liste der Layer-Namen, von denen Input kommt
-        output_to: Liste der Layer-Namen, zu denen Output geht
-    """
     name: str
     module: nn.Module
     layer_type: LayerType
@@ -133,12 +82,10 @@ class LayerNode:
     
     @property
     def module_class_name(self) -> str:
-        """Gibt den Klassennamen des Moduls zurück."""
         return type(self.module).__name__
     
     @property
     def has_activations(self) -> bool:
-        """Prüft ob das Modul Aktivierungen gespeichert hat (nur für LRP-Module)."""
         if not self.is_lrp_module:
             return False
         if not isinstance(self.module, LRPModuleMixin):
@@ -155,12 +102,6 @@ class LayerNode:
             f"lrp={self.is_lrp_module})"
         )
 
-
-# =============================================================================
-# Attention-Typ-Erkennung
-# =============================================================================
-
-
 _ATTENTION_CLASS_NAMES = frozenset({
     'multiheadattention',
     'msdeformattn',
@@ -171,15 +112,13 @@ _ATTENTION_CLASS_NAMES = frozenset({
     'lrp_msdeformattn',
 })
 
-
+# Prüfen ob Attention-Layer
 def _is_attention_module(module: nn.Module) -> bool:
-    """Prüft ob ein Modul ein Attention-Layer ist."""
     cls_name = type(module).__name__.lower()
     return cls_name in _ATTENTION_CLASS_NAMES
 
-
+# Prüfen ob Transformer-Block
 def _is_transformer_block(module: nn.Module) -> bool:
-    """Prüft ob ein Modul ein Transformer-Block ist (enthält Attention-Layer als Child)."""
     for child in module.children():
         if _is_attention_module(child):
             return True
@@ -189,39 +128,9 @@ def _is_transformer_block(module: nn.Module) -> bool:
                 return True
     return False
 
-
-# =============================================================================
-# Model Graph Hauptklasse
-# =============================================================================
-
+# Wir scannen nun das MaskDINO-Modell, damit wir die Layer in der richtigen Reihenfolge für LRP haben.
 
 class ModelGraph:
-    """Linearisiert ein MaskDINO-Modell in einen navigierbaren Graphen.
-    
-    Diese Klasse scannt das Modell einmalig und cached die Struktur.
-    Sie bietet effiziente Methoden für:
-    - Vorwärts-/Rückwärts-Iteration durch die Layer
-    - Filterung nach LayerType
-    - Zugriff auf LRP-fähige Module
-    
-    Attributes:
-        model: Das zugrundeliegende PyTorch-Modell
-        nodes: Dictionary aller LayerNodes, indexiert nach Namen
-        ordered_list: Liste aller LayerNodes in Forward-Reihenfolge
-        
-    Example:
-        >>> graph = ModelGraph(maskdino_model)
-        >>> 
-        >>> # Alle Decoder-Layer in Rückwärts-Reihenfolge
-        >>> for node in graph.backward_order(LayerType.DECODER):
-        ...     print(f"Processing {node.name}")
-        >>> 
-        >>> # Flattened Liste für LRP-Rückpropagation
-        >>> lrp_layers = graph.get_lrp_propagation_order()
-        >>> for name, module in reversed(lrp_layers):
-        ...     # Propagiere Relevanz rückwärts
-        ...     pass
-    """
     
     def __init__(
         self,
@@ -229,14 +138,6 @@ class ModelGraph:
         include_leaf_modules: bool = False,
         verbose: bool = False,
     ):
-        """Initialisiert den ModelGraph durch Scannen des Modells.
-        
-        Args:
-            model: Das zu analysierende PyTorch-Modell
-            include_leaf_modules: Wenn True, werden auch Blatt-Module (ohne Children)
-                                  in die Layer-Liste aufgenommen
-            verbose: Wenn True, werden Informationen während des Scannens ausgegeben
-        """
         self.model = model
         self._verbose = verbose
         self._include_leaf = include_leaf_modules
@@ -258,7 +159,6 @@ class ModelGraph:
             self._print_summary()
     
     def _build_graph(self) -> None:
-        """Scannt das Modell und baut den Graphen auf."""
         order_idx = 0
         seen_ids: Set[int] = set()
         
@@ -285,10 +185,10 @@ class ModelGraph:
             has_children = bool(list(module.children()))
             cls_name = type(module).__name__
             
-            # WICHTIG: Atomare LRP-Module immer aufnehmen, unabhängig von Children
+            # Atomare LRP-Module immer aufnehmen, unabhängig von Children
             is_atomic_lrp = cls_name in ATOMIC_LRP_CLASS_NAMES
             
-            # Filterlogik: Wir wollen Transformer-Blöcke und bestimmte wichtige Layer
+            # Wir wollen Transformer-Blöcke und bestimmte wichtige Layer
             if not is_block and has_children and not self._include_leaf and not is_atomic_lrp:
                 # Container-Modul ohne Attention -> überspringe (wird durch Children abgedeckt)
                 # AUSNAHME: Backbone-Stufen, Pixel-Decoder-Stufen
@@ -326,11 +226,10 @@ class ModelGraph:
             
             order_idx += 1
         
-        # Abhängigkeiten inferieren (vereinfacht: sequentiell nach Typ)
+        # Abhängigkeiten inferieren
         self._infer_dependencies()
     
     def _infer_dependencies(self) -> None:
-        """Inferiert Input/Output-Abhängigkeiten zwischen Layern."""
         # Innerhalb jedes Typs: sequentielle Abhängigkeit
         for layer_type in LayerType:
             nodes = self._by_type[layer_type]
@@ -367,7 +266,6 @@ class ModelGraph:
                 dec_node.input_from.append(pixel_decoder_nodes[-1].name)
     
     def _print_summary(self) -> None:
-        """Gibt eine Zusammenfassung des Graphen aus."""
         print(f"\n{'='*60}")
         print("ModelGraph Summary")
         print(f"{'='*60}")
@@ -381,71 +279,32 @@ class ModelGraph:
                 print(f"{layer_type.name:15} : {len(nodes):3} layers ({lrp_count} LRP-fähig)")
         print(f"{'='*60}\n")
     
-    # =========================================================================
-    # Iteration Methods
-    # =========================================================================
-    
+# Iteriert durch Layer in Forward-Reihenfolge
     def forward_order(
         self,
         layer_type: Optional[LayerType] = None
     ) -> Iterator[LayerNode]:
-        """Iteriert durch Layer in Forward-Reihenfolge.
-        
-        Args:
-            layer_type: Optional - nur Layer dieses Typs zurückgeben
-        
-        Yields:
-            LayerNode-Objekte in Forward-Reihenfolge
-        """
         if layer_type is None:
             yield from self.ordered_list
         else:
             yield from self._by_type[layer_type]
     
+# Iteriert durch Layer in Rückwärts-Reihenfolge
     def backward_order(
         self,
         layer_type: Optional[LayerType] = None
     ) -> Iterator[LayerNode]:
-        """Iteriert durch Layer in Rückwärts-Reihenfolge (für LRP).
-        
-        Args:
-            layer_type: Optional - nur Layer dieses Typs zurückgeben
-        
-        Yields:
-            LayerNode-Objekte in Rückwärts-Reihenfolge
-        """
         if layer_type is None:
             yield from reversed(self.ordered_list)
         else:
             yield from reversed(self._by_type[layer_type])
     
+    # Gibt die Reihenfolge der LRP-fähigen Module für die Rückpropagation zurück
+    
     def get_lrp_propagation_order(
         self,
         which_module: str = "all",
     ) -> List[Tuple[str, nn.Module]]:
-        """Gibt die geordnete Liste von LRP-fähigen Modulen für Rückpropagation.
-        
-        Dies ist die Hauptmethode für LRP-Analyse: Sie liefert die Module
-        in der korrekten Reihenfolge für die Relevanz-Rückpropagation.
-        
-        Reihenfolge (rückwärts):
-        1. Decoder (von letztem zu erstem Layer) - nur wenn which_module="decoder" oder "all"
-        2. Encoder (von letztem zu erstem Layer) - nur wenn which_module="encoder" oder "all"
-        3. Pixel Decoder
-        4. Backbone
-        
-        WICHTIG: Kinder von atomaren LRP-Modulen (LRP_MSDeformAttn, LRP_MultiheadAttention)
-        werden ausgeschlossen, da das Eltern-Modul die vollständige Propagation übernimmt.
-        
-        Args:
-            which_module: "all", "encoder" oder "decoder"
-                - "all": Vollständige Propagation durch alle Module
-                - "encoder": Nur Encoder + Pixel Decoder + Backbone (kein Decoder)
-                - "decoder": Nur Decoder-Module
-        
-        Returns:
-            Liste von (name, module) Tupeln in LRP-Rückpropagations-Reihenfolge
-        """
         result: List[Tuple[str, nn.Module]] = []
         
         # Sammle Namen von atomaren LRP-Modulen (MSDeformAttn, MultiheadAttention)
@@ -494,76 +353,38 @@ class ModelGraph:
         
         return result
     
+
     def get_flattened_layer_list(self) -> List[Tuple[str, nn.Module]]:
-        """Gibt eine flache Liste aller Layer in Forward-Reihenfolge.
-        
-        Format: [backbone.layer1, ..., pixel_decoder.layerX, transformer.decoder.layer0, ...]
-        
-        Returns:
-            Liste von (name, module) Tupeln
-        """
         return [(node.name, node.module) for node in self.ordered_list]
-    
-    # =========================================================================
-    # Access Methods
-    # =========================================================================
-    
+
     def __getitem__(self, name: str) -> LayerNode:
-        """Zugriff auf einen Layer nach Namen."""
         return self.nodes[name]
     
     def __contains__(self, name: str) -> bool:
-        """Prüft ob ein Layer mit diesem Namen existiert."""
         return name in self.nodes
     
     def __len__(self) -> int:
-        """Anzahl der Layer im Graphen."""
         return len(self.ordered_list)
     
     def __iter__(self) -> Iterator[LayerNode]:
-        """Iteration in Forward-Reihenfolge."""
         return iter(self.ordered_list)
     
     def get_by_type(self, layer_type: LayerType) -> List[LayerNode]:
-        """Gibt alle Layer eines bestimmten Typs zurück."""
         return self._by_type[layer_type].copy()
     
     def get_lrp_modules(self) -> Dict[str, LRPModuleMixin]:
-        """Gibt alle LRP-fähigen Module zurück.
-        
-        Delegiert an param_patcher.get_lrp_modules für Konsistenz.
-        """
         return get_lrp_modules(self.model)
     
     def get_attention_layers(self) -> List[LayerNode]:
-        """Gibt alle Attention-Layer zurück (MHA, MSDeformAttn)."""
         return [node for node in self.ordered_list if node.is_attention]
     
     def find_by_pattern(self, pattern: str) -> List[LayerNode]:
-        """Findet Layer deren Namen einem Regex-Muster entsprechen.
-        
-        Args:
-            pattern: Regex-Muster für den Layer-Namen
-        
-        Returns:
-            Liste der passenden LayerNodes
-        """
         regex = re.compile(pattern, re.IGNORECASE)
         return [node for node in self.ordered_list if regex.search(node.name)]
     
-    # =========================================================================
-    # LRP-spezifische Hilfsmethoden
-    # =========================================================================
+# Mappen von Decoder-Layern zu ihren Encoder-Inputs. Wichtifg für Cross-Attention
     
     def get_decoder_to_encoder_mapping(self) -> Dict[str, List[str]]:
-        """Gibt das Mapping von Decoder-Layern zu ihren Encoder-Inputs zurück.
-        
-        Dies ist wichtig für Cross-Attention, wo Decoder-Queries auf
-        Encoder-Memory zugreifen.
-        
-        Returns:
-            Dictionary: decoder_name -> [encoder_names]
-        """
         mapping: Dict[str, List[str]] = {}
         encoder_names = [n.name for n in self._by_type[LayerType.ENCODER]]
         
@@ -574,28 +395,17 @@ class ModelGraph:
         
         return mapping
     
+# Geb die Pixel-Decoder-Feature-Layer zurück
+
     def get_pixel_decoder_features(self) -> List[LayerNode]:
-        """Gibt die Pixel-Decoder-Feature-Layer zurück.
-        
-        Diese werden sowohl vom Encoder verwendet als auch vom Decoder
-        für die Mask-Prediction.
-        """
         return self._by_type[LayerType.PIXEL_DECODER].copy()
     
+# Tracke Relevanz-Pfad von einem Layer zurück
     def trace_relevance_path(
         self,
         start_layer: str,
         target_type: LayerType = LayerType.BACKBONE
     ) -> List[str]:
-        """Trackt den Relevanz-Pfad von einem Layer zurück zum Ziel-Typ.
-        
-        Args:
-            start_layer: Name des Start-Layers
-            target_type: Ziel-LayerType (Default: BACKBONE)
-        
-        Returns:
-            Liste der Layer-Namen auf dem Pfad
-        """
         if start_layer not in self.nodes:
             raise ValueError(f"Layer '{start_layer}' not found in graph")
         
@@ -628,16 +438,9 @@ class ModelGraph:
         return path
 
 
-# =============================================================================
-# Legacy-Kompatibilitätsfunktionen
-# =============================================================================
 
 
 def list_encoder_like_layers(model: nn.Module) -> List[Tuple[str, nn.Module]]:
-    """Legacy-Funktion: Finde Encoder-Layer.
-    
-    DEPRECATED: Verwende stattdessen ModelGraph.get_by_type(LayerType.ENCODER)
-    """
     warnings.warn(
         "list_encoder_like_layers ist deprecated. "
         "Verwende ModelGraph(model).get_by_type(LayerType.ENCODER)",
@@ -649,10 +452,6 @@ def list_encoder_like_layers(model: nn.Module) -> List[Tuple[str, nn.Module]]:
 
 
 def list_decoder_like_layers(model: nn.Module) -> List[Tuple[str, nn.Module]]:
-    """Legacy-Funktion: Finde Decoder-Layer.
-    
-    DEPRECATED: Verwende stattdessen ModelGraph.get_by_type(LayerType.DECODER)
-    """
     warnings.warn(
         "list_decoder_like_layers ist deprecated. "
         "Verwende ModelGraph(model).get_by_type(LayerType.DECODER)",
@@ -663,18 +462,10 @@ def list_decoder_like_layers(model: nn.Module) -> List[Tuple[str, nn.Module]]:
     return [(n.name, n.module) for n in graph.get_by_type(LayerType.DECODER)]
 
 
-# =============================================================================
-# Exports
-# =============================================================================
-
-
 __all__ = [
-    # Hauptklassen
     "ModelGraph",
     "LayerNode",
     "LayerType",
-    
-    # Legacy (deprecated)
     "list_encoder_like_layers",
     "list_decoder_like_layers",
 ]

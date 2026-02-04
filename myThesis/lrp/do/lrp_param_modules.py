@@ -1,50 +1,18 @@
-"""
-LRP-fähige Module, die PyTorch-Originale ersetzen und Aktivierungen intern speichern.
-
-Anstatt externe Hooks zu verwenden, implementiert dieses Modul Klassen, die von
-den PyTorch-Originalen erben und bei aktiviertem `is_lrp`-Flag die notwendigen
-Zwischenwerte (Eingaben, Ausgaben, Projektionen) in `self.activations` speichern.
-
-Module:
-    - LRP_Linear: Linear-Layer mit Aktivierungsspeicherung
-    - LRP_LayerNorm: LayerNorm mit Gamma/Beta und Eingangs-Capture
-    - LRP_MultiheadAttention: MHA mit Q, K, V, Attention-Gewichten
-    - LRP_MSDeformAttn: Multi-Scale Deformable Attention mit Sampling-Lokationen
-"""
 from __future__ import annotations
-
 from typing import Optional, Tuple
 import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch.nn.init import xavier_uniform_, constant_
-
 from .lrp_param_base import LRPActivations, LRPModuleMixin
 
 
-# =============================================================================
-# LRP_Linear: Linear-Layer mit Aktivierungsspeicherung
-# =============================================================================
-
+# Wir erstellen einen Linear-Layer, der aktive LRP-Modus Eingaben und Gewichte speichert.
 
 class LRP_Linear(nn.Linear, LRPModuleMixin):
-    """Linear-Layer, der bei aktivem LRP-Modus Eingaben und Gewichte speichert.
-    
-    Speichert:
-        - activations.input: Eingabe x (B, *, in_features)
-        - activations.output: Ausgabe y = x @ W^T + b
-        - activations.weights: Gewichtsmatrix W (out_features, in_features)
-        - activations.bias: Bias b (out_features,)
-    
-    Example:
-        >>> layer = LRP_Linear(256, 512)
-        >>> layer.is_lrp = True
-        >>> y = layer(x)
-        >>> print(layer.activations.input.shape)  # x gespeichert
-    """
+
     
     def forward(self, input: Tensor) -> Tensor:
         output = F.linear(input, self.weight, self.bias)
@@ -60,7 +28,6 @@ class LRP_Linear(nn.Linear, LRPModuleMixin):
     
     @classmethod
     def from_linear(cls, linear: nn.Linear) -> 'LRP_Linear':
-        """Konvertiert ein existierendes nn.Linear zu LRP_Linear."""
         lrp_linear = cls(
             in_features=linear.in_features,
             out_features=linear.out_features,
@@ -74,27 +41,9 @@ class LRP_Linear(nn.Linear, LRPModuleMixin):
         return lrp_linear
 
 
-# =============================================================================
-# LRP_LayerNorm: LayerNorm mit vollständiger Aktivierungsspeicherung
-# =============================================================================
-
+# Alle Parameter und Statistiken von LayerNorm sollen hier gespeichert werden.
 
 class LRP_LayerNorm(nn.LayerNorm, LRPModuleMixin):
-    """LayerNorm, der bei aktivem LRP-Modus alle Parameter und Statistiken speichert.
-    
-    Speichert:
-        - activations.input: Eingabe x vor Normalisierung
-        - activations.output: Normalisierte Ausgabe
-        - activations.gamma: Gewicht (normalized_shape)
-        - activations.beta: Bias (normalized_shape)
-        - activations.mean: Berechneter Mittelwert μ
-        - activations.var: Berechnete Varianz σ²
-    
-    Diese Werte ermöglichen die Anwendung verschiedener LRP-LayerNorm-Strategien:
-    - Taylor-Expansion
-    - Lokal-lineare Approximation
-    - Gradient-Times-Input (GTI)
-    """
     
     def forward(self, input: Tensor) -> Tensor:
         if self._is_lrp:
@@ -127,7 +76,6 @@ class LRP_LayerNorm(nn.LayerNorm, LRPModuleMixin):
     
     @classmethod
     def from_layernorm(cls, ln: nn.LayerNorm) -> 'LRP_LayerNorm':
-        """Konvertiert ein existierendes nn.LayerNorm zu LRP_LayerNorm."""
         lrp_ln = cls(
             normalized_shape=ln.normalized_shape,
             eps=ln.eps,
@@ -142,29 +90,9 @@ class LRP_LayerNorm(nn.LayerNorm, LRPModuleMixin):
         return lrp_ln
 
 
-# =============================================================================
-# LRP_MultiheadAttention: MHA mit vollständigem Q/K/V-Capture
-# =============================================================================
-
+# Für MultiheadAttention speichern wir wie folgt alle relevanten Zwischenwerte.
 
 class LRP_MultiheadAttention(nn.MultiheadAttention, LRPModuleMixin):
-    """MultiheadAttention, der bei aktivem LRP-Modus alle Zwischenwerte speichert.
-    
-    Speichert:
-        - activations.Q: Query-Projektionen (B, H, T, Dh)
-        - activations.K: Key-Projektionen (B, H, S, Dh)
-        - activations.V: Value-Projektionen (B, H, S, Dh)
-        - activations.attn_weights: Attention-Gewichte nach Softmax (B, H, T, S)
-        - activations.attn_scores: Rohe Scores vor Softmax (B, H, T, S)
-        - activations.W_Q, W_K, W_V, W_O: Projektionsgewichte (H, Dh, C)
-        - activations.scale: Skalierungsfaktor 1/√d_k
-        - activations.input: Ursprüngliche query, key, value
-        - activations.output: Attention-Output
-    
-    Note:
-        Im LRP-Modus wird need_weights=True und average_attn_weights=False
-        automatisch erzwungen, um die vollständigen Attention-Gewichte zu erhalten.
-    """
     
     def forward(
         self,
@@ -206,7 +134,6 @@ class LRP_MultiheadAttention(nn.MultiheadAttention, LRPModuleMixin):
         attn_output: Tensor,
         attn_weights: Optional[Tensor],
     ):
-        """Erfasst alle LRP-relevanten Zwischenwerte."""
         batch_first = getattr(self, 'batch_first', False)
         embed_dim = self.embed_dim
         num_heads = self.num_heads
@@ -268,7 +195,6 @@ class LRP_MultiheadAttention(nn.MultiheadAttention, LRPModuleMixin):
         self.activations.W_O = W_O.t().view(embed_dim, num_heads, head_dim).permute(1, 2, 0).detach()
     
     def _get_qkv_weights(self) -> Tuple[Tensor, Tensor, Tensor]:
-        """Extrahiert Q, K, V Gewichte aus in_proj_weight oder separaten Projektionen."""
         E = self.embed_dim
         
         if self.in_proj_weight is not None:
@@ -286,7 +212,6 @@ class LRP_MultiheadAttention(nn.MultiheadAttention, LRPModuleMixin):
     
     @classmethod
     def from_mha(cls, mha: nn.MultiheadAttention) -> 'LRP_MultiheadAttention':
-        """Konvertiert ein existierendes nn.MultiheadAttention zu LRP_MultiheadAttention."""
         lrp_mha = cls(
             embed_dim=mha.embed_dim,
             num_heads=mha.num_heads,
@@ -317,29 +242,9 @@ class LRP_MultiheadAttention(nn.MultiheadAttention, LRPModuleMixin):
         return lrp_mha
 
 
-# =============================================================================
-# LRP_MSDeformAttn: Multi-Scale Deformable Attention mit vollständigem Capture
-# =============================================================================
-
+# Multi-Scale Deformable Attention mit LRP-Aktivierungsspeicherung
 
 class LRP_MSDeformAttn(nn.Module, LRPModuleMixin):
-    """Multi-Scale Deformable Attention mit LRP-Aktivierungsspeicherung.
-    
-    Speichert bei aktivem LRP-Modus:
-        - activations.query: Query-Eingabe (B, T, C)
-        - activations.input_flatten: Flattened Multi-Scale Features (B, S, C)
-        - activations.reference_points: Referenzpunkte (B, T, L, 2|4)
-        - activations.value_proj: Projizierte Values (B, S, H, Dh)
-        - activations.sampling_locations: Sampling-Positionen (B, T, H, L, P, 2)
-        - activations.deform_attention_weights: Attention-Gewichte (B, T, H, L, P)
-        - activations.spatial_shapes: Räumliche Dimensionen (L, 2)
-        - activations.level_start_index: Start-Indizes (L,)
-        - activations.W_V: Value-Projektionsgewichte (H, Dh, C)
-        - activations.W_O: Output-Projektionsgewichte (H, Dh, C)
-    
-    Diese Aktivierungen ermöglichen LRP durch bilineares Splatting der Relevanz
-    zurück auf die Multi-Scale Feature-Maps.
-    """
     
     def __init__(
         self,
@@ -370,7 +275,6 @@ class LRP_MSDeformAttn(nn.Module, LRPModuleMixin):
         self._reset_parameters()
     
     def _reset_parameters(self):
-        """Initialisiert Parameter wie im Original."""
         constant_(self.sampling_offsets.weight.data, 0.)
         thetas = torch.arange(self.n_heads, dtype=torch.float32) * (2.0 * math.pi / self.n_heads)
         grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
@@ -396,18 +300,6 @@ class LRP_MSDeformAttn(nn.Module, LRPModuleMixin):
         input_level_start_index: Tensor,
         input_padding_mask: Optional[Tensor] = None,
     ) -> Tensor:
-        """
-        Args:
-            query: (N, Length_query, C)
-            reference_points: (N, Length_query, n_levels, 2|4)
-            input_flatten: (N, sum(H_l * W_l), C)
-            input_spatial_shapes: (n_levels, 2) -> [(H_0, W_0), ...]
-            input_level_start_index: (n_levels,)
-            input_padding_mask: (N, sum(H_l * W_l)), True for padding
-        
-        Returns:
-            output: (N, Length_query, C)
-        """
         N, Len_q, _ = query.shape
         N, Len_in, _ = input_flatten.shape
         
@@ -467,6 +359,8 @@ class LRP_MSDeformAttn(nn.Module, LRPModuleMixin):
         
         return output
     
+    # Deformable Attention Kernelfunktion
+    
     def _ms_deform_attn_core(
         self,
         value: Tensor,
@@ -474,17 +368,6 @@ class LRP_MSDeformAttn(nn.Module, LRPModuleMixin):
         sampling_locations: Tensor,
         attention_weights: Tensor,
     ) -> Tensor:
-        """PyTorch-Implementierung der Multi-Scale Deformable Attention.
-        
-        Args:
-            value: (N, S, H, Dh) projizierte Values
-            spatial_shapes: (L, 2) [(H_l, W_l), ...]
-            sampling_locations: (N, T, H, L, P, 2) normalisiert in [0, 1]
-            attention_weights: (N, T, H, L, P) Softmax-Gewichte
-        
-        Returns:
-            output: (N, T, C)
-        """
         N, S, H, Dh = value.shape
         _, Len_q, _, L, P, _ = sampling_locations.shape
         
@@ -544,7 +427,6 @@ class LRP_MSDeformAttn(nn.Module, LRPModuleMixin):
         attention_weights: Tensor,
         output: Tensor,
     ):
-        """Speichert alle LRP-relevanten Aktivierungen."""
         self.activations.query = query.detach()
         self.activations.reference_points = reference_points.detach()
         self.activations.input_flatten = input_flatten.detach()
@@ -555,7 +437,7 @@ class LRP_MSDeformAttn(nn.Module, LRPModuleMixin):
         self.activations.deform_attention_weights = attention_weights.detach()
         self.activations.output = output.detach()
         
-        # WICHTIG: Setze auch activations.input für die generische Propagator-Prüfung
+        #Setze auch activations.input für die generische Propagator-Prüfung
         # Für MSDeformAttn ist input_flatten der Haupteingang
         self.activations.input = input_flatten.detach()
         
@@ -572,7 +454,6 @@ class LRP_MSDeformAttn(nn.Module, LRPModuleMixin):
     
     @classmethod
     def from_msdeformattn(cls, msda: nn.Module) -> 'LRP_MSDeformAttn':
-        """Konvertiert ein existierendes MSDeformAttn zu LRP_MSDeformAttn."""
         lrp_msda = cls(
             d_model=msda.d_model,
             n_levels=msda.n_levels,
@@ -592,14 +473,7 @@ class LRP_MSDeformAttn(nn.Module, LRPModuleMixin):
         
         return lrp_msda
 
-
-# =============================================================================
-# Exports
-# =============================================================================
-
-
 __all__ = [
-    # LRP-Module
     "LRP_Linear",
     "LRP_LayerNorm",
     "LRP_MultiheadAttention",

@@ -4,23 +4,16 @@ from dataclasses import dataclass
 from typing import List, Optional, Any, Tuple, Dict
 
 
-# Default paths (kept for backward compatibility). You can override them via
-# function arguments in main() or via environment variables (see __main__).
 DEFAULT_BASE_DIR = "/Users/nicklehmacher/Alles/MasterArbeit"
 DEFAULT_OUTPUT_ROOT = os.path.join(
 	DEFAULT_BASE_DIR, "myThesis/output/car/finetune6"
 )
-
 DEFAULT_ENCODER_ROT_DIR = os.path.join(DEFAULT_OUTPUT_ROOT, "encoder/rot")
 DEFAULT_DECODER_DIR = os.path.join(DEFAULT_OUTPUT_ROOT, "decoder")
-
-# Where to store LRP per-feature outputs and a small summary CSV
 DEFAULT_LRP_OUT_DIR = os.path.join(DEFAULT_OUTPUT_ROOT, "lrp")
 DEFAULT_LRP_ENCODER_DIR = os.path.join(DEFAULT_LRP_OUT_DIR, "encoder")
 DEFAULT_LRP_DECODER_DIR = os.path.join(DEFAULT_LRP_OUT_DIR, "decoder")
 DEFAULT_SUMMARY_CSV = os.path.join(DEFAULT_LRP_OUT_DIR, "top_features.csv")
-
-# Images to use for LRP runs
 DEFAULT_IMAGES_DIR = os.path.join(DEFAULT_BASE_DIR, "myThesis/image/1images")
 
 
@@ -34,6 +27,7 @@ class TopFeature:
 	def to_row(self) -> List[Any]:
 		return [self.module, self.layer_idx, self.feature_idx, self.miou]
 
+# Berechne effektive Pfade basierend auf übergebenen Parametern und Standardwerten
 
 def _compute_paths(
 	*,
@@ -46,13 +40,6 @@ def _compute_paths(
 	lrp_decoder_dir: Optional[str] = None,
 	summary_csv: Optional[str] = None,
 ) -> Dict[str, str]:
-	"""Compute effective paths based on provided overrides.
-
-	The precedence is:
-	- explicit function argument
-	- derived from output_root (for encoder/decoder/lrp paths)
-	- module defaults
-	"""
 
 	# Start from defaults
 	eff_output_root = output_root or DEFAULT_OUTPUT_ROOT
@@ -185,7 +172,6 @@ def _get_existing_features(
 	lrp_encoder_dir: str,
 	lrp_decoder_dir: str,
 ) -> set:
-	"""Get set of (module, layer_idx, feature_idx) tuples for already-computed features."""
 	existing = set()
 	
 	# Check encoder directory
@@ -276,7 +262,7 @@ def run_lrp_for(
 			output_csv=out_csv,
 			weights_path=weights_path,
 			model_type=model_type,
-			use_model_cache=False,  # Disable cache to free memory
+			use_model_cache=False,
 			# Keep the rest as defaults; expose limit_images to be optionally stricter
 			#limit_images=(0 if limit_images is None else max(0, int(limit_images))),
 		)
@@ -346,18 +332,12 @@ def main(
 
 
 if __name__ == "__main__":
-	# Simple CLI via env vars to avoid adding argparse here
 	k_env = os.environ.get("TOP_K", "5")
 	do_lrp_env = os.environ.get("DO_LRP", "1")
 	limit_env = os.environ.get("LIMIT_IMAGES", "")
-
-	# Optional path overrides via environment
-	# High-level
 	images_dir_env = os.environ.get("IMAGES_DIR", "").strip() or None
 	output_root_env = os.environ.get("OUTPUT_ROOT", "").strip() or None
-	# Optional model weights override
 	weights_path_env = os.environ.get("WEIGHTS_PATH", "").strip() or None
-	# Fine-grained (all optional)
 	encoder_rot_dir_env = os.environ.get("ENCODER_ROT_DIR", "").strip() or None
 	decoder_dir_env = os.environ.get("DECODER_DIR", "").strip() or None
 	lrp_out_dir_env = os.environ.get("LRP_OUT_DIR", "").strip() or None

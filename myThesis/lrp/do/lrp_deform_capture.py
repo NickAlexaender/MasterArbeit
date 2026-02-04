@@ -1,51 +1,24 @@
-"""
-LRP Deformable Attention Capture - Monkey Patching für MSDeformAttn.
 
-Dieses Modul enthält die "schmutzige" Logik, um in die Modell-Interna
-einzugreifen und Sampling-Lokationen sowie Attention-Gewichte zu erfassen.
-
-Diese Funktionen werden benötigt, um während des Forward-Passes die
-internen Zustände der MSDeformAttn-Layer zu speichern, die für die
-LRP-Rückpropagation erforderlich sind.
-
-Hauptfunktionen:
-    - attach_msdeformattn_capture: Registriert Hooks auf MSDeformAttn-Modulen
-    - _resolve_msdeformattn_class: Findet die MSDeformAttn-Klasse
-    - _ForwardPatchHandle: Handle zum Entfernen der Patches
-"""
 from __future__ import annotations
-
 import warnings
 from typing import List, Optional
-
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 
 
-# =============================================================================
-# MSDeformAttn-Klassen-Kandidaten (verschiedene Implementierungen)
-# =============================================================================
-
 _MSDEFORMATTN_CLS_CANDIDATES = [
     "models.ops.modules.ms_deform_attn.MSDeformAttn",
     "projects.DETR2.d2.layers.deformable_attention.MSDeformAttn",
-    # MaskDINO (this repo): actual location of MSDeformAttn
     "maskdino.modeling.pixel_decoder.ops.modules.ms_deform_attn.MSDeformAttn",
-    # Legacy/alternative naming (kept for robustness)
     "maskdino.layers.ms_deform_attn.MSDeformAttn",
     "detectron2.layers.deformable_attention.MSDeformAttn",
-    # Optional: Ultralytics implementation (not used for MaskDINO, but harmless)
     "ultralytics.nn.modules.transformer.MSDeformAttn",
 ]
 
+# Hier versuchen wir die MSDeformAttn-Klasse zu laden
 
 def _resolve_msdeformattn_class() -> Optional[type]:
-    """Versucht die MSDeformAttn-Klasse aus verschiedenen möglichen Pfaden zu laden.
-    
-    Returns:
-        Die MSDeformAttn-Klasse oder None, falls nicht gefunden.
-    """
     for fq in _MSDEFORMATTN_CLS_CANDIDATES:
         try:
             mod_path, cls_name = fq.rsplit('.', 1)
@@ -58,17 +31,9 @@ def _resolve_msdeformattn_class() -> Optional[type]:
     return None
 
 
-# =============================================================================
-# Forward Patch Handle
-# =============================================================================
-
+# Wir managen hier den Forward-Patch, um diesesn sauber wieder zu entfernen
 
 class _ForwardPatchHandle:
-    """Handle zum Entfernen eines Forward-Patches.
-    
-    Ermöglicht das saubere Zurücksetzen des ursprünglichen forward()
-    nach dem LRP-Durchlauf.
-    """
     
     def __init__(self, mod: nn.Module, orig_forward):
         self._m = mod
@@ -76,7 +41,6 @@ class _ForwardPatchHandle:
         self._active = True
     
     def remove(self):
-        """Entfernt den Patch und stellt die ursprüngliche forward()-Methode wieder her."""
         if self._active and hasattr(self._m, 'forward'):
             try:
                 self._m.forward = self._orig
@@ -85,21 +49,9 @@ class _ForwardPatchHandle:
         self._active = False
 
 
-# =============================================================================
-# Hilfsfunktionen
-# =============================================================================
-
+# Iterieren des Modulbaums, um Eltern-Module zu finden
 
 def _iter_parents(root: nn.Module, child: nn.Module):
-    """Iteriert durch die Eltern-Module eines gegebenen Kind-Moduls.
-    
-    Args:
-        root: Das Wurzel-Modul (z.B. das gesamte Modell)
-        child: Das Kind-Modul, dessen Eltern gefunden werden sollen
-        
-    Yields:
-        Tupel (name, parent_module) für jedes Eltern-Modul
-    """
     name_to_module = {n: m for n, m in root.named_modules()}
     module_to_parent = {}
     for name, module in root.named_modules():
@@ -112,17 +64,9 @@ def _iter_parents(root: nn.Module, child: nn.Module):
         yield pname, parent
         current = parent
 
+# Auslesen der Projektionsgewichte
 
 def _maybe_capture_parent_projections(parent_block: nn.Module, attn_cache: object) -> None:
-    """Versucht die Projektionsgewichte aus dem Eltern-Block zu erfassen.
-    
-    Manche Implementierungen haben value_proj und output_proj im Eltern-Block
-    statt direkt im MSDeformAttn-Modul.
-    
-    Args:
-        parent_block: Das Eltern-Modul
-        attn_cache: Cache-Objekt zum Speichern der Gewichte
-    """
     try:
         vp = getattr(parent_block, 'value_proj', None)
         op = getattr(parent_block, 'output_proj', None)
@@ -146,42 +90,12 @@ def _maybe_capture_parent_projections(parent_block: nn.Module, attn_cache: objec
         pass
 
 
-# =============================================================================
-# Haupt-Capture-Funktion
-# =============================================================================
-
+# Erfassungen von Aktivierungen in MSDeformAttn-Modulen
 
 def attach_msdeformattn_capture(
     root: nn.Module,
     attn_cache: Optional[object],
 ) -> List[_ForwardPatchHandle]:
-    """Registriert Hooks auf MSDeformAttn-Modulen zum Erfassen von Aktivierungen.
-    
-    Diese Funktion wrapped die forward()-Methode aller MSDeformAttn-Module
-    im gegebenen Modell-Baum, um während des Forward-Passes folgende Daten
-    zu erfassen:
-    
-    - Sampling-Lokationen (wo in der Feature-Map gesampelt wird)
-    - Attention-Gewichte (wie stark jeder Sampling-Punkt gewichtet wird)
-    - Spatial Shapes (Größe jeder Feature-Map-Ebene)
-    - Projektionsgewichte (W_V, W_O)
-    
-    Args:
-        root: Das Wurzel-Modul (typischerweise das gesamte Modell)
-        attn_cache: Ein Objekt (z.B. dataclass), in das die Aktivierungen
-                   geschrieben werden. Muss Attributzuweisung unterstützen.
-    
-    Returns:
-        Liste von _ForwardPatchHandle-Objekten zum späteren Entfernen der Patches
-    
-    Beispiel:
-        >>> cache = LRPActivations()
-        >>> handles = attach_msdeformattn_capture(model, cache)
-        >>> output = model(input)  # cache wird gefüllt
-        >>> # Nach LRP:
-        >>> for h in handles:
-        ...     h.remove()
-    """
     handles: List[_ForwardPatchHandle] = []
     MSDeformAttn = _resolve_msdeformattn_class()
     
@@ -207,18 +121,10 @@ def attach_msdeformattn_capture(
     
     if attn_cache is None:
         warnings.warn('attach_msdeformattn_capture called without attn_cache', stacklevel=2)
+        
+    # Jetzt wrappen wir die forward-Methode
 
     def _wrap_forward(mod: nn.Module):
-        """Wrapped MSDeformAttn.forward mit der tatsächlichen Signatur von MaskDINO.
-
-        forward(self,
-            query: (N, Len_q, C),
-            reference_points: (N, Len_q, L, 2|4),
-            input_flatten: (N, S, C),
-            input_spatial_shapes: (L, 2),
-            input_level_start_index: (L,),
-            input_padding_mask: Optional[(N,S)] = None)
-        """
         orig_forward = mod.forward
         
         def _patched_forward(
@@ -253,7 +159,6 @@ def attach_msdeformattn_capture(
         
         mod.forward = _patched_forward
         handles.append(_ForwardPatchHandle(mod, orig_forward))
-
     # Alle MSDeformAttn-Instanzen finden und wrappen
     found = 0
     for m in root.modules():
@@ -267,7 +172,6 @@ def attach_msdeformattn_capture(
                     pass
                 break
             found += 1
-    
     if found == 0:
         # Keine Instanzen gefunden
         try:
@@ -288,6 +192,7 @@ def attach_msdeformattn_capture(
     
     return handles
 
+# Erfassung der Aktivierungen in einem MSDeformAttn-Modul
 
 def _capture_activations(
     mod: nn.Module,
@@ -299,33 +204,17 @@ def _capture_activations(
     input_padding_mask: Optional[Tensor],
     attn_cache: object,
 ) -> None:
-    """Erfasst die internen Aktivierungen eines MSDeformAttn-Moduls.
-    
-    Args:
-        mod: Das MSDeformAttn-Modul
-        query: Query-Tensor (N, Len_q, C)
-        reference_points: Referenzpunkte (N, Len_q, L, 2|4)
-        input_flatten: Flattened Input (N, S, C)
-        input_spatial_shapes: Spatial Shapes (L, 2)
-        input_level_start_index: Level Start Indices (L,)
-        input_padding_mask: Optional Padding Mask (N, S)
-        attn_cache: Cache-Objekt zum Speichern
-    """
     N, Len_q, _ = query.shape
     N2, S, _ = input_flatten.shape
-    
     if N2 != N:
-        raise RuntimeError("MSDeformAttn: Batchgröße inkonsistent")
-    
+        raise RuntimeError("MSDeformAttn: Batchgröße inkonsistent") 
     # Value-Projektion und Maskierung
     value = mod.value_proj(input_flatten)
     if input_padding_mask is not None:
         value = value.masked_fill(input_padding_mask[..., None], float(0))
-    
     Hh = mod.n_heads
     Dh = mod.d_model // mod.n_heads
     value_reshaped = value.view(N, S, Hh, Dh)  # (N, S, H, Dh)
-    
     # Sampling-Offsets und Attention-Gewichte berechnen
     sampling_offsets = mod.sampling_offsets(query).view(
         N, Len_q, Hh, mod.n_levels, mod.n_points, 2
@@ -336,7 +225,6 @@ def _capture_activations(
     attention_weights = F.softmax(attention_weights, -1).view(
         N, Len_q, Hh, mod.n_levels, mod.n_points
     )
-    
     # Sampling-Lokationen berechnen
     if reference_points.shape[-1] == 2:
         offset_normalizer = torch.stack(
@@ -354,19 +242,16 @@ def _capture_activations(
         )
     else:
         sampling_locations = None
-
     # In den Cache schreiben (detach für Stabilität)
     if sampling_locations is not None:
         setattr(attn_cache, 'deform_sampling_locations', sampling_locations.detach())
         setattr(attn_cache, 'deform_attention_weights', attention_weights.detach())
         setattr(attn_cache, 'deform_spatial_shapes', input_spatial_shapes.detach())
         setattr(attn_cache, 'deform_level_start_index', input_level_start_index.detach())
-    
     # Metadaten
     im2col = getattr(mod, 'im2col_step', None)
     if isinstance(im2col, int):
         setattr(attn_cache, 'deform_im2col_step', im2col)
-    
     # Projektionsgewichte (H, Dh, C)
     try:
         W_v = mod.value_proj.weight.detach()  # (C, C)
@@ -378,16 +263,10 @@ def _capture_activations(
         setattr(attn_cache, 'W_O_deform', WOd)
     except Exception:
         pass
-    
     # Parent-Projektionen optional
     parent = getattr(mod, '_lrp_parent_block', None)
     if parent is not None:
         _maybe_capture_parent_projections(parent, attn_cache)
-
-
-# =============================================================================
-# Exports
-# =============================================================================
 
 __all__ = [
     "attach_msdeformattn_capture",

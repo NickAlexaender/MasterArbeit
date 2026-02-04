@@ -1,25 +1,8 @@
-"""
-LRP Propagatoren - Mathematische Arbeiterschaft für Layer-Propagation.
-
-Dieses Modul enthält die puren Funktionen für die Layer-spezifische
-Relevanz-Propagation. Hier wird gerechnet, nicht verwaltet.
-
-Jede Funktion nimmt Aktivierungen und Relevanz als Input und gibt
-die propagierte Relevanz zurück.
-
-Verwendung:
-    >>> from lrp_propagators import propagate_linear, propagate_multihead_attention
-    >>> R_in = propagate_linear(module, activations, R_out, eps=1e-6)
-"""
 from __future__ import annotations
-
 import logging
 from typing import Optional, Tuple
-
 import torch
 from torch import Tensor
-
-# LRP-Regeln
 from .lrp_rules_attention import (
     lrp_attention_qk_path,
     lrp_attention_to_weights,
@@ -41,18 +24,9 @@ from .param_patcher import (
     LRP_MultiheadAttention,
 )
 
-
-# =============================================================================
-# Logging Setup
-# =============================================================================
-
 logger = logging.getLogger("lrp.propagators")
 
-
-# =============================================================================
-# MS Deformable Attention Propagation
-# =============================================================================
-
+# LRP für Multi-Scale Deformable Attention
 
 def propagate_msdeformattn(
     module: LRP_MSDeformAttn,
@@ -60,20 +34,6 @@ def propagate_msdeformattn(
     R_out: Tensor,
     eps: float = 1e-6,
 ) -> Tensor:
-    """LRP für Multi-Scale Deformable Attention.
-    
-    Verwendet bilineares Splatting, um Relevanz auf die Multi-Scale
-    Feature-Maps zurückzupropagieren.
-    
-    Args:
-        module: Das LRP_MSDeformAttn Modul
-        activations: Gespeicherte Aktivierungen vom Forward Pass
-        R_out: Ausgabe-Relevanz
-        eps: Epsilon für numerische Stabilität
-        
-    Returns:
-        R_source: Relevanz auf den Source-Features
-    """
     # Erforderliche Aktivierungen
     sampling_locations = activations.sampling_locations
     attention_weights = activations.deform_attention_weights
@@ -89,7 +49,7 @@ def propagate_msdeformattn(
     W_O = activations.W_O
     value_features = activations.input_flatten
     
-    # WICHTIG: R_out Shape muss zu sampling_locations passen!
+    # R_out Shape muss zu sampling_locations passen
     # sampling_locations hat Shape (B, T, H, L, P, 2)
     # R_out muss Shape (B, T, C) haben
     B_loc = sampling_locations.shape[0]
@@ -131,10 +91,7 @@ def propagate_msdeformattn(
     return R_source
 
 
-# =============================================================================
-# Multi-Head Attention Propagation
-# =============================================================================
-
+# Nun erstellen wir LRP für Multi-Head-Attention
 
 def propagate_multihead_attention(
     module: LRP_MultiheadAttention,
@@ -143,21 +100,6 @@ def propagate_multihead_attention(
     eps: float = 1e-6,
     attn_qk_share: float = 0.0,
 ) -> Tensor:
-    """LRP für Multi-Head Attention.
-    
-    Propagiert durch den Value-Pfad (O = A·V) und optional
-    durch den Q/K-Pfad für vollständige Attribution.
-    
-    Args:
-        module: Das LRP_MultiheadAttention Modul
-        activations: Gespeicherte Aktivierungen vom Forward Pass
-        R_out: Ausgabe-Relevanz
-        eps: Epsilon für numerische Stabilität
-        attn_qk_share: Anteil der Q/K-Pfad Attribution (0.0-1.0)
-        
-    Returns:
-        R_in: Relevanz auf den Eingabe-Features
-    """
     # Erforderliche Aktivierungen
     attn_weights = activations.attn_weights
     V = activations.V
@@ -242,6 +184,7 @@ def propagate_multihead_attention(
     
     return R_V
 
+# Wir müssen Reshapen
 
 def _reshape_R_out_for_attention(
     R_out: Tensor,
@@ -250,18 +193,6 @@ def _reshape_R_out_for_attention(
     Dh: int,
     C: int,
 ) -> Optional[Tensor]:
-    """Hilfsfunktion zum Reshapen von R_out für Attention.
-    
-    Args:
-        R_out: Relevanz-Tensor in verschiedenen möglichen Formaten
-        B: Batch-Größe
-        H: Anzahl Attention Heads
-        Dh: Dimension pro Head
-        C: Gesamt-Embedding-Dimension (H * Dh)
-        
-    Returns:
-        R_out_heads: Reshaped zu (B, H, T, Dh) oder None bei Fehler
-    """
     total_elements = R_out.numel()
     
     if R_out.dim() == 3:
@@ -305,10 +236,7 @@ def _reshape_R_out_for_attention(
         return None
 
 
-# =============================================================================
-# LayerNorm Propagation
-# =============================================================================
-
+# Nun erstellen wir LRP für LayerNorm
 
 def propagate_layernorm(
     module: LRP_LayerNorm,
@@ -317,22 +245,6 @@ def propagate_layernorm(
     eps: float = 1e-6,
     ln_rule: str = "taylor",
 ) -> Tensor:
-    """LRP für LayerNorm.
-    
-    Verwendet verschiedene Strategien je nach Konfiguration:
-    - taylor: Taylor-Expansion 1. Ordnung
-    - zsign: Vorzeichenbewahrende z-Regel
-    
-    Args:
-        module: Das LRP_LayerNorm Modul
-        activations: Gespeicherte Aktivierungen vom Forward Pass
-        R_out: Ausgabe-Relevanz
-        eps: Epsilon für numerische Stabilität
-        ln_rule: LRP-Regel für LayerNorm ("taylor", "zsign")
-        
-    Returns:
-        R_in: Relevanz auf den Eingabe-Features
-    """
     x = activations.input
     gamma = activations.gamma
     beta = activations.beta
@@ -365,17 +277,9 @@ def propagate_layernorm(
     
     return R_in
 
+# Hier müssen wir Shapes angleichen
 
 def _align_shapes_for_layernorm(x: Tensor, R_out: Tensor) -> Optional[Tensor]:
-    """Versucht Shapes zwischen x und R_out anzugleichen.
-    
-    Args:
-        x: Input-Aktivierung
-        R_out: Ausgabe-Relevanz
-        
-    Returns:
-        R_out mit angepasster Shape oder Original R_out bei Fehler (nie None!)
-    """
     # Versuche Transposition: (T, B, C) <-> (B, T, C)
     if x.dim() == 3 and R_out.dim() == 3:
         # Prüfe ob Transposition hilft
@@ -398,10 +302,7 @@ def _align_shapes_for_layernorm(x: Tensor, R_out: Tensor) -> Optional[Tensor]:
         return R_out
 
 
-# =============================================================================
-# Linear Layer Propagation
-# =============================================================================
-
+# Wir brauchen auch LRP für Linear Layer mit ε-Regel
 
 def propagate_linear(
     module: LRP_Linear,
@@ -409,17 +310,6 @@ def propagate_linear(
     R_out: Tensor,
     eps: float = 1e-6,
 ) -> Tensor:
-    """LRP für Linear Layer mit ε-Regel.
-    
-    Args:
-        module: Das LRP_Linear Modul
-        activations: Gespeicherte Aktivierungen vom Forward Pass
-        R_out: Ausgabe-Relevanz
-        eps: Epsilon für numerische Stabilität
-        
-    Returns:
-        R_in: Relevanz auf den Eingabe-Features
-    """
     x = activations.input
     weight = activations.weights
     bias = activations.bias
@@ -439,10 +329,7 @@ def propagate_linear(
     return R_in
 
 
-# =============================================================================
-# Residual Connection Propagation
-# =============================================================================
-
+# Jetzt LRP für Residual-Verbindungen
 
 def propagate_residual(
     x: Tensor,
@@ -451,18 +338,6 @@ def propagate_residual(
     mode: str = "proportional",
     eps: float = 1e-6,
 ) -> Tuple[Tensor, Tensor]:
-    """Propagiert Relevanz durch eine Residual-Verbindung y = x + F(x).
-    
-    Args:
-        x: Skip-Pfad Aktivierungen
-        Fx: Transform-Pfad Aktivierungen
-        R_y: Relevanz am Ausgang
-        mode: Split-Modus ("proportional", "equal", "skip_only", "transform_only")
-        eps: Epsilon für numerische Stabilität
-        
-    Returns:
-        (R_x, R_Fx): Relevanz für Skip- und Transform-Pfad
-    """
     R_x, R_Fx = residual_split(
         x=x,
         Fx=Fx,
@@ -473,11 +348,7 @@ def propagate_residual(
     
     return R_x, R_Fx
 
-
-# =============================================================================
-# Generic Layer Dispatch
-# =============================================================================
-
+# Generische Dispatch-Funktion für Layer-Propagation
 
 def propagate_layer(
     module,
@@ -487,22 +358,6 @@ def propagate_layer(
     ln_rule: str = "taylor",
     attn_qk_share: float = 0.0,
 ) -> Tensor:
-    """Generische Dispatch-Funktion für Layer-Propagation.
-    
-    Wählt automatisch die passende Propagationsfunktion basierend auf
-    dem Modul-Typ aus.
-    
-    Args:
-        module: Das PyTorch-Modul (muss LRPModuleMixin implementieren)
-        activations: Gespeicherte Aktivierungen vom Forward Pass
-        R_out: Ausgabe-Relevanz
-        eps: Epsilon für numerische Stabilität
-        ln_rule: LRP-Regel für LayerNorm
-        attn_qk_share: Anteil der Q/K-Pfad Attribution
-        
-    Returns:
-        R_in: Propagierte Relevanz
-    """
     # Prüfe ob es ein LRP-fähiges Modul ist
     if not isinstance(module, LRPModuleMixin):
         # Für nicht-LRP-Module: Identitäts-Propagation
@@ -534,20 +389,11 @@ def propagate_layer(
         logger.debug(f"Unbekannter LRP-Modul-Typ: {type(module).__name__}")
         return R_out
 
-
-# =============================================================================
-# Exports
-# =============================================================================
-
-
 __all__ = [
-    # Layer-spezifische Propagation
     "propagate_msdeformattn",
     "propagate_multihead_attention",
     "propagate_layernorm",
     "propagate_linear",
     "propagate_residual",
-    
-    # Generische Dispatch-Funktion
     "propagate_layer",
 ]

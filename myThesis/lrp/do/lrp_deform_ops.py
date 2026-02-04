@@ -1,28 +1,11 @@
-"""
-LRP Deformable Ops - Mathematische Operationen für Deformable Attention LRP.
-
-Dieses Modul enthält die geometrischen und mathematischen Kernoperationen
-für die LRP-Rückpropagation durch Deformable Attention:
-
-- Bilineare Interpolationsgewichte
-- Scatter-Add Operationen für Relevanz-Splatting
-- Pixel-Index-Berechnungen
-
-Diese Funktionen sind "reine" mathematische Operationen ohne Modell-Abhängigkeiten.
-"""
 from __future__ import annotations
-
 from typing import Tuple
-
 import torch
 from torch import Tensor
 import torch.nn.functional as F
 
 
-# =============================================================================
-# Bilineare Interpolations-Gewichte
-# =============================================================================
-
+# Bei bilinearer Interpolation wird ein Wert an Position (x, y) aus den 4 nächsten Pixeln interpoliert
 
 def compute_bilinear_weights(
     x: Tensor,
@@ -30,27 +13,6 @@ def compute_bilinear_weights(
     H: int,
     W: int,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """Berechnet die 4 bilinearen Interpolationsgewichte und Pixelindizes.
-    
-    Bei bilinearer Interpolation wird ein Wert an Position (x, y) aus den
-    4 nächsten Pixeln interpoliert:
-    
-        f(x,y) = (1-fx)(1-fy)·f[y0,x0] + fx(1-fy)·f[y0,x1]
-               + (1-fx)fy·f[y1,x0] + fx·fy·f[y1,x1]
-    
-    wobei fx = x - floor(x), fy = y - floor(y)
-    
-    Args:
-        x: x-Koordinaten (beliebige Form)
-        y: y-Koordinaten (gleiche Form wie x)
-        H: Höhe der Feature-Map
-        W: Breite der Feature-Map
-    
-    Returns:
-        Tuple aus:
-        - x0, x1, y0, y1: Integer-Pixelkoordinaten (geclampt)
-        - w00, w10, w01, w11: Bilineare Gewichte
-    """
     # Floor-Koordinaten
     x0 = torch.floor(x).long()
     y0 = torch.floor(y).long()
@@ -68,13 +30,14 @@ def compute_bilinear_weights(
     fy = (y - y0.float()).clamp(0, 1)
     
     # Bilineare Gewichte
-    w00 = (1 - fx) * (1 - fy)  # top-left
-    w10 = fx * (1 - fy)         # top-right
-    w01 = (1 - fx) * fy         # bottom-left
-    w11 = fx * fy               # bottom-right
+    w00 = (1 - fx) * (1 - fy)
+    w10 = fx * (1 - fy)
+    w01 = (1 - fx) * fy
+    w11 = fx * fy
     
     return x0_clamped, x1_clamped, y0_clamped, y1_clamped, w00, w10, w01, w11
 
+# Wir berechnen alle 4 Ecken mit Koordinaten und Gewichten
 
 def compute_bilinear_corners(
     x: Tensor,
@@ -82,19 +45,6 @@ def compute_bilinear_corners(
     H: int,
     W: int,
 ) -> list:
-    """Berechnet alle 4 Ecken mit Koordinaten und Gewichten.
-    
-    Kompaktere Variante von compute_bilinear_weights für Schleifen.
-    
-    Args:
-        x: x-Koordinaten
-        y: y-Koordinaten
-        H: Feature-Map Höhe
-        W: Feature-Map Breite
-        
-    Returns:
-        Liste von Tupeln (x_coord, y_coord, weight) für alle 4 Ecken
-    """
     x0 = torch.floor(x).long()
     y0 = torch.floor(y).long()
     
@@ -108,11 +58,7 @@ def compute_bilinear_corners(
         ((x0+1).clamp(0, W-1), (y0+1).clamp(0, H-1), fx*fy),      # bottom-right
     ]
 
-
-# =============================================================================
-# Bilineares Splatting
-# =============================================================================
-
+# Wir verteilen Relevanz auf die Feature-Map. Jeder Sampling-Punkt trägt zu den 4 nächsten Pixeln bei
 
 def bilinear_splat_relevance(
     R_out: Tensor,
@@ -123,32 +69,6 @@ def bilinear_splat_relevance(
     level_start_idx: int,
     eps: float = 1e-9,
 ) -> Tensor:
-    """Verteilt Relevanz via bilinearem Splatting auf die Feature-Map eines Levels.
-    
-    Implementiert die Formel:
-        R_pixel = R_output · W_attn · W_bilinear
-    
-    Jeder Sampling-Punkt trägt zu den 4 nächsten Pixeln bei, gewichtet nach:
-    1. Attention-Gewicht A_{mqk} (wie wichtig ist dieser Sampling-Punkt)
-    2. Bilineares Interpolationsgewicht (Distanz zum Integer-Pixel)
-    
-    Args:
-        R_out: Relevanz am Ausgang (B, T, 1) oder (B, T, C)
-        sampling_locations: Normierte Koordinaten (B, T, H_heads, P, 2) in [0,1]
-        attention_weights: Attention-Gewichte (B, T, H_heads, P), ≥0
-        H: Höhe der Feature-Map dieses Levels
-        W: Breite der Feature-Map dieses Levels
-        level_start_idx: Start-Index in der flachen S-Dimension
-        eps: Stabilisierungsterm
-    
-    Returns:
-        R_level: (B, H*W, C) Relevanz auf dieser Feature-Map-Ebene
-    
-    Mathematik:
-        Für jeden Query-Token t und jeden Sampling-Punkt k mit Position p_{tk}:
-        - Berechne bilineare Gewichte w_i für die 4 Nachbarpixel i
-        - Verteile Relevanz: R_i += R_t · A_{tk} · w_i
-    """
     B, T, H_heads, P, _ = sampling_locations.shape
     device = sampling_locations.device
     dtype = R_out.dtype
@@ -182,6 +102,7 @@ def bilinear_splat_relevance(
     
     return R_level
 
+# Wir erstellen eine vektorisierte Version des bilinearen Splatting für bessere Performance
 
 def bilinear_splat_relevance_vectorized(
     R_out: Tensor,
@@ -191,18 +112,6 @@ def bilinear_splat_relevance_vectorized(
     W: int,
     eps: float = 1e-9,
 ) -> Tensor:
-    """Vektorisierte Version des bilinearen Splatting (schneller für große Batches).
-    
-    Args:
-        R_out: Relevanz am Ausgang (B, T, C) oder (B, T, 1)
-        sampling_locations: Normierte Koordinaten (B, T, H_heads, P, 2)
-        attention_weights: Attention-Gewichte (B, T, H_heads, P)
-        H, W: Spatial dimensions
-        eps: Stabilisierung
-    
-    Returns:
-        R_level: (B, H*W, C) akkumulierte Pixel-Relevanz
-    """
     B, T, H_heads, P, _ = sampling_locations.shape
     device = sampling_locations.device
     dtype = R_out.dtype
@@ -242,10 +151,7 @@ def bilinear_splat_relevance_vectorized(
     return R_level
 
 
-# =============================================================================
-# Multi-Level Splatting
-# =============================================================================
-
+# Wir splatten Relevanz auf ein einzelnes Level in-place
 
 def splat_to_level(
     R_out: Tensor,
@@ -256,16 +162,6 @@ def splat_to_level(
     base_idx: int,
     R_target: Tensor,
 ) -> None:
-    """Splattet Relevanz auf ein einzelnes Level in-place.
-    
-    Args:
-        R_out: (B, T, C) Ausgabe-Relevanz
-        sampling_locations_level: (B, T, H_heads, P, 2) für dieses Level
-        attention_weights_level: (B, T, H_heads, P) für dieses Level
-        H_l, W_l: Dimensionen dieses Levels
-        base_idx: Start-Index in R_target
-        R_target: (B, S_total, C) Ziel-Tensor (wird in-place modifiziert)
-    """
     B, T, H_heads, P, _ = sampling_locations_level.shape
     C = R_out.shape[-1]
     
@@ -276,10 +172,10 @@ def splat_to_level(
     # Bilineare Ecken
     corners = compute_bilinear_corners(x, y, H_l, W_l)
     
-    # Basis-Relevanz - WICHTIG: Durch Anzahl der Köpfe dividieren für Konservierung!
+    # Basis-Relevanz
     # Jeder Kopf trägt 1/H_heads zur Gesamtrelevanz bei
     R_expanded = R_out.unsqueeze(2).unsqueeze(3).expand(-1, -1, H_heads, P, -1)
-    R_expanded = R_expanded / H_heads  # Normalisierung für Konservierung
+    R_expanded = R_expanded / H_heads
     attn_expanded = attention_weights_level.unsqueeze(-1)
     base_R = R_expanded * attn_expanded
     
@@ -300,10 +196,7 @@ def splat_to_level(
         )
 
 
-# =============================================================================
-# Relevanz-Aggregation zu Spatial Maps
-# =============================================================================
-
+# Extrahiert Relevanz für ein einzelnes Level
 
 def extract_level_relevance(
     R_source: Tensor,
@@ -311,17 +204,6 @@ def extract_level_relevance(
     level_start_index: Tensor,
     target_level: int,
 ) -> Tuple[Tensor, int, int]:
-    """Extrahiert Relevanz für ein einzelnes Level.
-    
-    Args:
-        R_source: (B, S, C) Relevanz auf flachen Quell-Tokens
-        spatial_shapes: (L, 2) Feature-Map-Größen
-        level_start_index: (L,) Start-Indizes
-        target_level: Welches Level extrahiert werden soll
-        
-    Returns:
-        Tuple (R_level, H_l, W_l)
-    """
     spatial_shapes = spatial_shapes.long()
     level_start_index = level_start_index.long()
     
@@ -333,6 +215,7 @@ def extract_level_relevance(
     R_level = R_source[:, start:end, :]
     return R_level, H_l, W_l
 
+# Reshapet Level-Relevanz zu räumlicher Form
 
 def reshape_to_spatial(
     R_level: Tensor,
@@ -340,16 +223,6 @@ def reshape_to_spatial(
     W: int,
     aggregation: str = "sum",
 ) -> Tensor:
-    """Reshapet Level-Relevanz zu räumlicher Form.
-    
-    Args:
-        R_level: (B, H*W, C) Relevanz
-        H, W: Spatial dimensions
-        aggregation: "sum", "mean", "max", oder "none"
-        
-    Returns:
-        (B, H, W) bei Aggregation, sonst (B, C, H, W)
-    """
     B, _, C = R_level.shape
     R_spatial = R_level.view(B, H, W, C).permute(0, 3, 1, 2)
     
@@ -364,6 +237,7 @@ def reshape_to_spatial(
     else:
         raise ValueError(f"Unbekannte Aggregation: {aggregation}")
 
+# Formt flache Relevanz zu einer Heatmap um
 
 def compute_pixel_relevance_map(
     R_source: Tensor,
@@ -372,23 +246,12 @@ def compute_pixel_relevance_map(
     target_level: int = 0,
     aggregation: str = "sum",
 ) -> Tensor:
-    """Konvertiert flache Quell-Relevanz zu einer räumlichen Heatmap.
-    
-    Args:
-        R_source: (B, S, C) Relevanz auf flachen Quell-Tokens
-        spatial_shapes: (L, 2) Feature-Map-Größen
-        level_start_index: (L,) Start-Indizes
-        target_level: Welches Level extrahiert werden soll
-        aggregation: "sum", "mean", oder "max" über Kanäle
-    
-    Returns:
-        R_spatial: (B, H_l, W_l) oder (B, C, H_l, W_l) je nach aggregation
-    """
     R_level, H_l, W_l = extract_level_relevance(
         R_source, spatial_shapes, level_start_index, target_level
     )
     return reshape_to_spatial(R_level, H_l, W_l, aggregation)
 
+# Aggregiert Relevanz über alle Levels zu einer einheitlichen Heatmap
 
 def compute_multiscale_relevance_map(
     R_source: Tensor,
@@ -398,19 +261,6 @@ def compute_multiscale_relevance_map(
     aggregation: str = "sum",
     interpolation: str = "bilinear",
 ) -> Tensor:
-    """Aggregiert Relevanz über alle Levels zu einer einheitlichen Heatmap.
-    
-    Args:
-        R_source: (B, S, C) Relevanz auf flachen Quell-Tokens
-        spatial_shapes: (L, 2) Feature-Map-Größen
-        level_start_index: (L,) Start-Indizes
-        target_size: (H_target, W_target) Zielgröße
-        aggregation: Kanal-Aggregation ("sum", "mean", "max")
-        interpolation: Interpolationsmethode ("bilinear", "nearest")
-    
-    Returns:
-        R_final: (B, H_target, W_target) finale Relevanz-Heatmap
-    """
     B = R_source.shape[0]
     device = R_source.device
     dtype = R_source.dtype
@@ -440,21 +290,12 @@ def compute_multiscale_relevance_map(
     return R_final
 
 
-# =============================================================================
-# Exports
-# =============================================================================
-
 __all__ = [
-    # Bilineare Gewichte
     "compute_bilinear_weights",
     "compute_bilinear_corners",
-    
-    # Splatting
     "bilinear_splat_relevance",
     "bilinear_splat_relevance_vectorized",
     "splat_to_level",
-    
-    # Relevanz-Aggregation
     "extract_level_relevance",
     "reshape_to_spatial",
     "compute_pixel_relevance_map",

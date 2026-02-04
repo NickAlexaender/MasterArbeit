@@ -1,13 +1,4 @@
-"""
-Tensor utility functions used across the LRP analysis code.
-
-Contains strictly stateless math helper functions:
-- safe_divide: Handles division by zero for LRP stability.
-- rearrange_activations: Converts between Detectron2's (N, C, H, W) and Transformer (N, L, C) formats.
-- compute_jacobian: Helper to compute local Jacobians for Gradient-Times-Input (GTI) on unstable layers.
-"""
 from __future__ import annotations
-
 from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
 import warnings
 import torch
@@ -15,10 +6,7 @@ import torch.nn as nn
 from torch import Tensor
 
 
-# =============================================================================
-# Safe Division for LRP Stability
-# =============================================================================
-
+# wie sichern wir Division zur Vermeidung von NaN/Inf in LRP-Berechnungen
 
 def safe_divide(
     numerator: Tensor,
@@ -26,28 +14,6 @@ def safe_divide(
     eps: float = 1e-9,
     signed_eps: bool = True,
 ) -> Tensor:
-    """Sichere Division zur Vermeidung von NaN/Inf in LRP-Berechnungen.
-
-    LRP-Regeln erfordern häufig Divisionen der Form a / z, wobei z die
-    Summe gewichteter Eingaben ist. Bei z ≈ 0 entstehen numerische
-    Instabilitäten. Diese Funktion stabilisiert durch Hinzufügen eines
-    kleinen Epsilon-Wertes.
-
-    Args:
-        numerator: Zähler-Tensor.
-        denominator: Nenner-Tensor (kann nahe Null sein).
-        eps: Minimaler Absolutwert zur Stabilisierung.
-        signed_eps: Falls True, wird das Vorzeichen des Nenners beibehalten
-                    (standard LRP-ε-Regel). Falls False, wird |eps| addiert.
-
-    Returns:
-        Stabilisierter Quotient numerator / (denominator + ε).
-
-    Example:
-        >>> z = torch.tensor([1.0, 0.0, -0.5, 1e-15])
-        >>> safe_divide(torch.ones(4), z)
-        tensor([1.0000, 1e9, -2.0000, 1e9])  # stabil, kein Inf/NaN
-    """
     if signed_eps:
         # Vorzeichen-erhaltende Stabilisierung (LRP-ε Standardregel)
         stabilizer = eps * torch.sign(denominator) + (denominator == 0).float() * eps
@@ -55,11 +21,7 @@ def safe_divide(
         stabilizer = eps
     return numerator / (denominator + stabilizer)
 
-
-# =============================================================================
-# Activation Rearrangement (Detectron2 <-> Transformer Format)
-# =============================================================================
-
+# Wir müssen Aktivierungen konvertieren zwischen Detectron2- und Transformer-Formaten
 
 def rearrange_activations(
     tensor: Tensor,
@@ -67,31 +29,6 @@ def rearrange_activations(
     target_format: str,
     spatial_shape: Optional[Tuple[int, int]] = None,
 ) -> Tensor:
-    """Konvertiert Aktivierungen zwischen Detectron2- und Transformer-Formaten.
-
-    Unterstützte Formate:
-    - "NCHW": Detectron2/CNN-Standard (Batch, Channels, Height, Width)
-    - "NLC":  Transformer-Standard (Batch, Length/Tokens, Channels)
-    - "NC":   Flaches Format (Batch, Channels) – nur für Ausgaben ohne Raum
-
-    Args:
-        tensor: Eingabe-Tensor.
-        source_format: Quellformat ("NCHW", "NLC", oder "NC").
-        target_format: Zielformat ("NCHW", "NLC", oder "NC").
-        spatial_shape: (H, W) erforderlich bei NLC -> NCHW Konversion.
-
-    Returns:
-        Tensor im Zielformat.
-
-    Raises:
-        ValueError: Bei unbekannten Formaten oder fehlender spatial_shape.
-
-    Example:
-        >>> x = torch.randn(2, 256, 14, 14)  # NCHW
-        >>> y = rearrange_activations(x, "NCHW", "NLC")
-        >>> y.shape
-        torch.Size([2, 196, 256])
-    """
     source_format = source_format.upper()
     target_format = target_format.upper()
 
@@ -151,41 +88,13 @@ def rearrange_activations(
     raise ValueError(f"Unbekannte Formatkonversion: {source_format} -> {target_format}")
 
 
-# =============================================================================
-# Jacobian Computation for Gradient-Times-Input (GTI)
-# =============================================================================
-
+# Wo instabile Layer versagen könnten, kann GTI nützlich sein
 
 def compute_jacobian(
     func: Callable[[Tensor], Tensor],
     x: Tensor,
     create_graph: bool = False,
 ) -> Tensor:
-    """Berechnet die Jacobi-Matrix für eine Funktion f: R^n -> R^m.
-
-    Nützlich für Gradient-Times-Input (GTI) Methode bei instabilen Layern,
-    wo klassische LRP-Regeln versagen können.
-
-    Args:
-        func: Differenzierbare Funktion f(x).
-        x: Eingabe-Tensor der Form (batch, *input_dims).
-        create_graph: Falls True, wird der Berechnungsgraph für höhere
-                      Ableitungen beibehalten.
-
-    Returns:
-        Jacobi-Matrix der Form (batch, *output_dims, *input_dims).
-
-    Note:
-        Für hochdimensionale Tensoren kann dies speicherintensiv sein.
-        Erwäge torch.func.jacrev/jacfwd für effizientere Berechnung.
-
-    Example:
-        >>> linear = nn.Linear(4, 3)
-        >>> x = torch.randn(2, 4, requires_grad=True)
-        >>> J = compute_jacobian(linear, x)
-        >>> J.shape
-        torch.Size([2, 3, 4])
-    """
     x = x.detach().requires_grad_(True)
     y = func(x)
 
@@ -220,36 +129,13 @@ def compute_jacobian(
     input_shape = x[0].shape
     return jacobian.view(batch_size, *output_shape, *input_shape)
 
+# GTI ist eine einfache aber effektive Attributionsmethode: R = x * (∂y/∂x)
 
 def gradient_times_input(
     func: Callable[[Tensor], Tensor],
     x: Tensor,
     target_indices: Optional[Union[int, Tensor]] = None,
 ) -> Tensor:
-    """Gradient-Times-Input (GTI) Relevanz für instabile Layer.
-
-    GTI ist eine einfache aber effektive Attributionsmethode:
-    R = x * (∂y/∂x)
-
-    Für Layer wo LRP-ε/γ instabil sind (z.B. Layer Normalization,
-    Batch Normalization), bietet GTI eine robuste Alternative.
-
-    Args:
-        func: Differenzierbare Funktion.
-        x: Eingabe-Tensor.
-        target_indices: Optionale Ziel-Output-Indizes für selektive Attribution.
-                        Falls None, werden alle Outputs berücksichtigt.
-
-    Returns:
-        Relevanz-Tensor mit gleicher Form wie x.
-
-    Example:
-        >>> layer = nn.LayerNorm(256)
-        >>> x = torch.randn(2, 100, 256)
-        >>> R = gradient_times_input(layer, x)
-        >>> R.shape
-        torch.Size([2, 100, 256])
-    """
     x = x.detach().requires_grad_(True)
     y = func(x)
 
@@ -272,13 +158,7 @@ def gradient_times_input(
     return x * grads
 
 
-# =============================================================================
-# Legacy Helper Functions (Internal Use)
-# =============================================================================
-
-
 def _flatten(obj: Any) -> List[Any]:
-    """Flacht verschachtelte Strukturen (tuple/list) ab, behält Reihenfolge."""
     if isinstance(obj, (list, tuple)):
         res: List[Any] = []
         for it in obj:
@@ -300,18 +180,6 @@ def _first_tensor(obj: Any) -> Tensor:
 
 
 def _to_BTC(t: Tensor) -> Tensor:
-    """Bringe Tensor robust in Form (B, T, C).
-
-    Note:
-        Für explizite Formatkonvertierung bevorzuge `rearrange_activations()`.
-
-    Regeln:
-    - 4D: (B, C, H, W) -> (B, H*W, C) via rearrange_activations
-    - 3D: Unverändert zurückgeben (erwartet (B, T, C)). Keine heuristische Permutation.
-      Falls tatsächlich (T,B,C) vorliegt, bitte explizit vor dem Aufruf transponieren.
-      Bei Verdacht (erste Achse deutlich größer als zweite) wird eine Warnung ausgegeben.
-    - 2D: (B, C) -> (B, 1, C) via rearrange_activations
-    """
     if t.dim() == 4:
         return rearrange_activations(t, "NCHW", "NLC")
     if t.dim() == 3:
@@ -328,7 +196,6 @@ def _to_BTC(t: Tensor) -> Tensor:
 
 
 def aggregate_channel_relevance(R_in: Tensor) -> Tensor:
-    """Aggregiere Eingangsrelevanz zu einem Vektor (C_in,)."""
     if R_in.dim() == 4:  # (B, C, H, W)
         return R_in.sum(dim=(0, 2, 3)).detach().cpu()
     if R_in.dim() == 3:  # (B, L, C)
@@ -345,14 +212,6 @@ def build_target_relevance(
     target_norm: str = "sum1",
     index_axis: str = "channel",
 ) -> Tensor:
-    """Erzeuge eine Start-Relevanz R_out ohne Gradienten.
-
-    index_axis:
-    - "channel": feature_index adressiert den Kanal (C-Achse)
-    - "token":   feature_index adressiert den Token/Query (T-Achse)
-
-    token_reduce wirkt nur bei index_axis="channel" und steuert die Verteilung über Tokens.
-    """
     y = _to_BTC(layer_output)  # (B, T, C)
     B, T, C = y.shape
 

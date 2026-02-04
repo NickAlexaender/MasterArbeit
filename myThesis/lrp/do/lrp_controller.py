@@ -1,39 +1,16 @@
-"""
-LRP Controller - Der Manager für LRP-Analyse (Flow Control).
-
-Dieses Modul enthält die LRPController-Klasse, die für den Workflow
-der LRP-Analyse verantwortlich ist: prepare, forward, backward loop
-und State-Management.
-
-Die mathematische Propagationslogik liegt in lrp_propagators.py.
-Datenstrukturen sind in lrp_structs.py definiert.
-High-Level Tools (Batch-Verarbeitung) sind in lrp_analysis.py.
-
-Verwendung:
-    >>> from lrp_controller import LRPController
-    >>> controller = LRPController(model, verbose=True)
-    >>> controller.prepare()  # Swapped Module für LRP-Capture
-    >>> relevance_map = controller.run(image_tensor, target_class=0)
-"""
 from __future__ import annotations
-
 import gc
 import logging
 from typing import Dict, List, Optional, Tuple, Union
-
 import torch
 import torch.nn as nn
 from torch import Tensor
-
-# Lokale Module - Konfiguration
 from .config import (
     ATTN_QK_SHARE,
     LN_RULE,
     RESIDUAL_SPLIT,
     SIGN_PRESERVING,
 )
-
-# Lokale Module - Modell-Graph und Parameter
 from .model_graph_wrapper import LayerNode, ModelGraph
 from .param_patcher import (
     LRPModuleMixin,
@@ -41,52 +18,19 @@ from .param_patcher import (
     prepare_model_for_lrp,
     set_lrp_mode,
 )
-
-# Lokale Module - Tensor-Operationen
 from .tensor_ops import build_target_relevance
-
-# LRP Datenstrukturen (aus lrp_structs.py)
 from .lrp_structs import LRPResult, LayerRelevance
-
-# LRP Propagatoren (aus lrp_propagators.py)
 from .lrp_propagators import propagate_layer, propagate_residual
-
-
-# =============================================================================
-# Logging Setup
-# =============================================================================
 
 logger = logging.getLogger("lrp.controller")
 
-
-# =============================================================================
-# LRP Controller - Hauptklasse
-# =============================================================================
-
+# Hier entsteht der zentrale LRP-Controller - verwaltet den gesamten LRP-Workflow
+# Modell-Vorbereitung
+# Forward Pass mit Aktivierungserfassung
+# Backward Pass mit Relevanz-Propagation
+# Aggregation
 
 class LRPController:
-    """Zentraler Controller für Layer-wise Relevance Propagation.
-    
-    Diese Klasse verwaltet den vollständigen LRP-Workflow:
-    1. Modell-Vorbereitung (Modul-Swapping für Aktivierungsspeicherung)
-    2. Forward Pass mit Aktivierungserfassung
-    3. Backward Pass mit Relevanz-Propagation
-    4. Aggregation und Konservierungsprüfung
-    
-    Attributes:
-        model: Das zu analysierende PyTorch-Modell
-        graph: Der linearisierte Modell-Graph
-        device: Zielgerät (cpu/cuda)
-        eps: Epsilon für numerische Stabilität
-        verbose: Ausführliche Logging-Ausgabe
-        
-    Example:
-        >>> controller = LRPController(maskdino_model)
-        >>> controller.prepare()
-        >>> result = controller.run(image, target_query=0)
-        >>> heatmap = result.R_input.sum(dim=1)  # Aggregiere über Kanäle
-    """
-    
     def __init__(
         self,
         model: nn.Module,
@@ -94,14 +38,6 @@ class LRPController:
         eps: float = 1e-6,
         verbose: bool = False,
     ):
-        """Initialisiert den LRP Controller.
-        
-        Args:
-            model: Das zu analysierende Modell (z.B. MaskDINO)
-            device: Zielgerät für Berechnungen
-            eps: Epsilon für numerische Stabilität
-            verbose: Aktiviert ausführliches Logging
-        """
         self.model = model
         self.device = device
         self.eps = eps
@@ -109,7 +45,7 @@ class LRPController:
         self._prepared = False
         self._graph: Optional[ModelGraph] = None
         
-        # Speicher für Raw-Decoder-Outputs (vor Post-Processing)
+        # Speicher für Raw-Decoder-Outputs
         self._decoder_raw_outputs: Optional[Dict[str, Tensor]] = None
         self._decoder_hook_handle = None
         
@@ -118,17 +54,13 @@ class LRPController:
         self.ln_rule = LN_RULE
         self.attn_qk_share = ATTN_QK_SHARE
         self.sign_preserving = SIGN_PRESERVING
-        
-        # verbose=True -> INFO Level (nicht DEBUG, da zu viele Logs)
         if verbose:
             logger.setLevel(logging.INFO)
     
+    # Hier Hook auf dem Decoder zum Anfngen der Raw-Outputs
+    
     def _register_decoder_hook(self) -> None:
-        """Registriert einen Hook auf dem Decoder, um Raw-Outputs abzufangen.
         
-        MaskDINO löscht die pred_logits im Inferenz-Modus bevor sie zurückgegeben
-        werden. Dieser Hook fängt sie vorher ab.
-        """
         # Entferne alten Hook falls vorhanden
         if self._decoder_hook_handle is not None:
             self._decoder_hook_handle.remove()
@@ -147,7 +79,6 @@ class LRPController:
             return
         
         def hook_fn(module, args, output):
-            """Speichert die Raw-Decoder-Outputs."""
             # MaskDINO gibt (outputs_dict, mask_dict) zurück
             if isinstance(output, tuple) and len(output) >= 1:
                 raw_output = output[0]
@@ -161,13 +92,10 @@ class LRPController:
                         logger.debug(f"Decoder-Raw-Outputs gespeichert: {list(self._decoder_raw_outputs.keys())}")
         
         self._decoder_hook_handle = decoder_module.register_forward_hook(hook_fn)
-        # if self.verbose:
-        #     logger.info("Decoder-Hook registriert auf sem_seg_head")
         
-    # =========================================================================
-    # Vorbereitung
-    # =========================================================================
-    
+# Wir bereiten das Modell auf LRP vor.
+# Heißt wir ersetzen PyTorch-Standard_module durch LRP-fähige Versionen -> können dann aktivierungen intern speichern
+
     def prepare(
         self,
         swap_linear: bool = False,
@@ -175,20 +103,6 @@ class LRPController:
         swap_mha: bool = True,
         swap_msdeform: bool = True,
     ) -> Dict[str, int]:
-        """Bereitet das Modell für LRP-Analyse vor.
-        
-        Ersetzt PyTorch-Standard-Module durch LRP-fähige Versionen, die
-        Aktivierungen intern speichern können.
-        
-        Args:
-            swap_linear: Ersetze nn.Linear (kann sehr viele sein)
-            swap_layernorm: Ersetze nn.LayerNorm
-            swap_mha: Ersetze nn.MultiheadAttention
-            swap_msdeform: Ersetze MSDeformAttn
-            
-        Returns:
-            Dictionary mit Anzahl der ersetzten Module pro Typ
-        """
         if self._prepared:
             logger.warning("Modell wurde bereits vorbereitet. Überspringe.")
             return {}
@@ -214,16 +128,11 @@ class LRPController:
         )
         
         self._prepared = True
-        
-        # if self.verbose:
-        #     logger.info(f"LRP-Vorbereitung abgeschlossen: {stats}")
-        #     logger.info(f"Graph enthält {len(self._graph)} Layer")
-        
         return stats
+    
     
     @property
     def graph(self) -> ModelGraph:
-        """Gibt den Modell-Graphen zurück (lazy initialization)."""
         if self._graph is None:
             self._graph = ModelGraph(
                 self.model,
@@ -232,22 +141,12 @@ class LRPController:
             )
         return self._graph
     
-    # =========================================================================
-    # Forward Pass
-    # =========================================================================
-    
+# Erst muss der Forward Pass durchgeführt werden, um die Aktivierungen zu speichern
+
     def forward_pass(
         self,
         inputs: Union[Tensor, List[Dict]],
     ) -> Dict[str, any]:
-        """Führt den Forward Pass mit Aktivierungserfassung durch.
-        
-        Args:
-            inputs: Eingabe-Tensor oder Detectron2-kompatible Batch-Liste
-            
-        Returns:
-            Model-Ausgabe (predictions)
-        """
         # LRP-Modus aktivieren
         set_lrp_mode(self.model, enabled=True)
         
@@ -255,21 +154,17 @@ class LRPController:
         self._decoder_raw_outputs = None
         
         try:
-            # WICHTIG: Nicht inference_mode() verwenden, da sonst detach() nicht
-            # korrekt funktioniert und Aktivierungen nicht gespeichert werden können.
-            # Stattdessen no_grad() verwenden, das Tensor-Operationen erlaubt.
             with torch.no_grad():
                 outputs = self.model(inputs)
         finally:
-            # LRP-Modus bleibt aktiv für Backward Pass
             pass
         
         return outputs
     
-    # =========================================================================
-    # Backward Pass - Hauptloop
-    # =========================================================================
-    
+# Anschließend führen wir den Backward Pass durch, um die Relevanz zu propagieren - gemäß layer spezifischen regeln
+# Relevanz wird auf dem OUTPUT des Start-Layers initialisiert
+# Wir propagieren durch ALLE Layer
+
     def backward_pass(
         self,
         R_start: Tensor,
@@ -279,77 +174,25 @@ class LRPController:
         clear_activations: bool = True,
         start_layer_index: Optional[int] = None,
     ) -> LRPResult:
-        """Führt den LRP Backward Pass durch.
-        
-        Iteriert durch den Modell-Graphen in umgekehrter Reihenfolge und
-        propagiert Relevanz gemäß den Layer-spezifischen LRP-Regeln.
-        
-        Args:
-            R_start: Start-Relevanz (typisch auf Decoder-Output)
-            target_layer: Optional - stoppe bei diesem Layer
-            which_module: "all", "encoder" oder "decoder" - bestimmt welche
-                Module in der Propagation berücksichtigt werden
-            stop_after_cross_attn: Bei Decoder-LRP: Stoppe nach dem ersten 
-                cross_attn Layer (Standard: True). Nach cross_attn wechselt
-                die Relevanz von Query-Space (300) zu Encoder-Token-Space (13125).
-            clear_activations: Aktivierungen nach Propagation löschen (Standard: True).
-                Setze auf False wenn mehrere Backward-Passes auf den gleichen
-                Aktivierungen laufen sollen (z.B. bei run_all_queries).
-            start_layer_index: Optional - 0-basierter Index des Start-Layers in der
-                Propagationsreihenfolge. Überspringe Layer vor diesem Index.
-                Wird für Layer-zu-Layer LRP verwendet.
-            
-        Returns:
-            LRPResult mit Relevanz-Maps und Metadaten
-        """
         result = LRPResult()
-        # OPTIMIZATION: Kein clone() - R_start wird nicht verändert, R_current zeigt darauf
         R_current = R_start
-        
-        # OPTIMIZATION: Memory-Bereinigung vor Backward Pass entfernt
-        # Bei Batch-Verarbeitung ist gc.collect() hier zu teuer (20-50ms pro Bild)
-        # Memory wird am Ende des gesamten Batches bereinigt
-        
-        # Hole die Layer-Liste in LRP-Propagations-Reihenfolge
-        # basierend auf which_module
         propagation_order = self.graph.get_lrp_propagation_order(which_module=which_module)
-        
-        # HINWEIS: Bei Layer-zu-Layer LRP (start_layer_index angegeben):
-        # - Die Relevanz wurde bereits auf dem OUTPUT des Start-Layers initialisiert
-        # - Wir propagieren durch ALLE Layer (nicht nur ab start_layer_index)
-        # - Das ist korrekt, weil wir die Verteilung auf die EINGABE-Features sehen wollen
-        # 
-        # Frühere Logik (start_layer_index zum Überspringen) war falsch:
-        # Sie übersprang Layer, die eigentlich für die Propagation nötig sind.
-        #
-        # Beispiel: Wenn wir bei layers.0.self_attn starten:
-        # - Alte Logik: Überspringe alle Layer und propagiere nur durch layers.0 -> keine Verteilung!
-        # - Neue Logik: Propagiere durch ALLE Layer -> korrekte Verteilung
         if start_layer_index is not None and self.verbose:
             logger.debug(f"Layer-zu-Layer LRP: Start-Layer-Index {start_layer_index}, "
                         f"propagiere durch alle {len(propagation_order)} Layer")
-        
-        # if self.verbose:
-        #     logger.info(f"Starte Backward Pass mit {len(propagation_order)} Layern (which_module={which_module})")
         
         for layer_name, module in propagation_order:
             # Progress-Logging
             logger.debug(f"Propagiere Layer: {layer_name} (R_current.shape={R_current.shape})")
             
-            # Bei Decoder-LRP: Cross-Attention Layer ÜBERSPRINGEN, da sie die Shape
-            # von Query-Space (300) zu Encoder-Token-Space (13125) transformieren würden.
-            # Für Layer-zu-Layer LRP im Decoder wollen wir im Query-Space bleiben!
-            # Wir propagieren nur durch Self-Attention und LayerNorm Layer.
             if stop_after_cross_attn and which_module == "decoder":
                 if "cross_attn" in layer_name and "decoder" in layer_name:
                     if self.verbose:
                         logger.debug(f"Überspringe cross_attn {layer_name} - bleibe im Query-Space (300)")
-                    continue  # Überspringe diesen Layer, aber propagiere weiter durch andere
+                    continue
             
             # Stoppe bei Ziel-Layer falls angegeben
             if target_layer and layer_name == target_layer:
-                # if self.verbose:
-                #     logger.info(f"Erreiche Ziel-Layer: {layer_name}")
                 break
             
             # Hole Layer-Node für Metadaten
@@ -365,7 +208,6 @@ class LRPController:
                     R_out=R_current,
                 )
                 
-                # MEMORY: Aktivierungen dieses Layers nur löschen wenn gewünscht
                 # Bei run_all_queries brauchen wir die Aktivierungen für alle Queries
                 if clear_activations and hasattr(module, 'activations') and module.activations is not None:
                     module.activations.clear()
@@ -374,25 +216,7 @@ class LRPController:
                 conservation_error = self._check_conservation(R_current, R_prev)
                 result.conservation_errors.append(conservation_error)
                 
-                # Konservierungsfehler nicht mehr loggen (zu verbose)
-                # if abs(conservation_error) > 0.01 and self.verbose:
-                #     logger.warning(
-                #         f"Konservierungsfehler bei {layer_name}: {conservation_error:.4f}"
-                #     )
-                
-                # MEMORY OPTIMIZATION: R_per_layer komplett deaktiviert
-                # Wird nur für Debug gebraucht, spart erheblich Memory + clone() Zeit
-                # Falls Debug nötig: Umgebungsvariable LRP_DEBUG=1 setzen
-                # if os.getenv('LRP_DEBUG'):
-                #     result.R_per_layer[layer_name] = R_prev
-                
-                # Update für nächste Iteration
                 R_current = R_prev
-                
-                # OPTIMIZATION: Memory-Cleanup ohne gc.collect()
-                # gc.collect() ist sehr teuer (~20-50ms pro Layer bei vielen Layern)
-                # Bei 6 Layern = 120-300ms pro Bild!
-                # Aufräumen passiert automatisch + am Ende des Batches
                 del R_prev
                 
             except Exception as e:
@@ -408,25 +232,14 @@ class LRPController:
         
         return result
     
+    # Propagiert Relevanz durch einen einzelnen Layer
+    
     def _propagate_layer(
         self,
         module: nn.Module,
         node: LayerNode,
         R_out: Tensor,
     ) -> Tensor:
-        """Propagiert Relevanz durch einen einzelnen Layer.
-        
-        Delegiert die eigentliche Berechnung an die Propagator-Funktionen
-        aus lrp_propagators.py.
-        
-        Args:
-            module: Das PyTorch-Modul
-            node: Der zugehörige LayerNode
-            R_out: Ausgabe-Relevanz
-            
-        Returns:
-            R_in: Eingabe-Relevanz
-        """
         # Prüfe ob es ein LRP-fähiges Modul ist
         if not isinstance(module, LRPModuleMixin):
             # Für nicht-LRP-Module: Identitäts-Propagation
@@ -448,26 +261,14 @@ class LRPController:
             attn_qk_share=self.attn_qk_share,
         )
     
-    # =========================================================================
-    # Residual-Handling
-    # =========================================================================
-    
+# Propagiert Relevanz durch eine Residual-Verbindung y = x + F(x).
+
     def propagate_with_residual(
         self,
         x: Tensor,
         Fx: Tensor,
         R_y: Tensor,
     ) -> tuple:
-        """Propagiert Relevanz durch eine Residual-Verbindung y = x + F(x).
-        
-        Args:
-            x: Skip-Pfad Aktivierungen
-            Fx: Transform-Pfad Aktivierungen
-            R_y: Relevanz am Ausgang
-            
-        Returns:
-            (R_x, R_Fx): Relevanz für Skip- und Transform-Pfad
-        """
         return propagate_residual(
             x=x,
             Fx=Fx,
@@ -476,18 +277,9 @@ class LRPController:
             eps=self.eps,
         )
     
-    # =========================================================================
-    # Hilfsmethoden
-    # =========================================================================
+    #Konservierungsprüfung
     
     def _check_conservation(self, R_out: Tensor, R_in: Optional[Tensor]) -> float:
-        """Prüft die Relevanz-Konservierung.
-        
-        LRP sollte idealerweise konservativ sein: sum(R_in) ≈ sum(R_out)
-        
-        Returns:
-            Relativer Konservierungsfehler
-        """
         # Robuster Check für None
         if R_in is None:
             logger.warning("R_in ist None - überspringe Konservierungsprüfung")
@@ -505,12 +297,9 @@ class LRPController:
         
         return (sum_in - sum_out) / abs(sum_out)
     
+    # Bereinigen des Modells nach LRP-Durchlauf
+    
     def cleanup(self, run_gc: bool = False):
-        """Bereinigt Aktivierungen und setzt LRP-Modus zurück.
-        
-        Args:
-            run_gc: Wenn True, wird gc.collect() aufgerufen (teuer, aber spart RAM)
-        """
         set_lrp_mode(self.model, enabled=False)
         clear_all_activations(self.model)
         
@@ -518,11 +307,9 @@ class LRPController:
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-    
-    # =========================================================================
-    # High-Level API
-    # =========================================================================
-    
+
+# Jetzt können wir die gesamte LRP-Analyse in einer Methode zusammenfassen
+
     def run(
         self,
         inputs: Union[Tensor, List[Dict]],
@@ -534,26 +321,6 @@ class LRPController:
         target_layer_index: Optional[int] = None,
         target_layer_name: Optional[str] = None,
     ) -> LRPResult:
-        """Führt vollständige LRP-Analyse durch.
-        
-        Args:
-            inputs: Eingabe-Tensor oder Detectron2-Batch
-            target_class: Zielklasse für Attribution (optional)
-            target_query: Ziel-Query-Index (bei Object Detection / Decoder-LRP)
-            normalize: Normalisierungsmethode ("sum1", "sumAbs1", "none")
-            which_module: "all", "encoder" oder "decoder" - bestimmt welche
-                Module in der Propagation berücksichtigt werden
-            target_feature: Für Encoder-Modus - Kanal-Index für Start-Relevanz.
-                Für Decoder-Modus - Query-Index (gleich wie target_query).
-            target_layer_index: Für Layer-zu-Layer LRP - 0-basierter Index des
-                Start-Layers (in Propagationsreihenfolge). Wenn None, startet
-                die Propagation am letzten Layer des jeweiligen Moduls.
-            target_layer_name: Für Layer-zu-Layer LRP - Name des Ziel-Layers.
-                Wenn angegeben, hat dies Priorität über target_layer_index.
-            
-        Returns:
-            LRPResult mit Relevanz-Maps
-        """
         if not self._prepared:
             self.prepare()
         
@@ -571,7 +338,7 @@ class LRPController:
                     target_layer_name=target_layer_name,
                 )
             elif which_module == "decoder" and target_layer_name is not None:
-                # NEU: Für Decoder Layer-zu-Layer LRP: Verwende Output des spezifizierten Decoder-Layers
+                # Für Decoder Layer-zu-Layer LRP: Verwende Output des spezifizierten Decoder-Layers
                 R_start, prop_start_index = self._get_decoder_start_relevance(
                     query_index=target_query,
                     normalize=normalize,
@@ -620,26 +387,6 @@ class LRPController:
         which_module: str = "decoder",
         gc_interval: int = 300,
     ) -> List[LRPResult]:
-        """Führt LRP-Analyse für alle Queries auf einmal durch.
-        
-        Diese Methode ist effizienter als run() mehrfach aufzurufen,
-        da der Forward Pass nur einmal ausgeführt wird.
-        
-        WICHTIG: Jede Query bekommt ihre eigene Start-Relevanz basierend auf
-        ihren tatsächlichen Ausgabewerten. Die Relevanz ist proportional zu den
-        absoluten Werten der Decoder-Outputs für diese Query.
-        
-        Args:
-            inputs: Eingabe-Tensor oder Detectron2-Batch
-            num_queries: Anzahl der Queries (Standard: 300 für MaskDINO)
-            target_class: Zielklasse für Attribution (optional)
-            normalize: Normalisierungsmethode ("sum1", "sumAbs1", "none")
-            which_module: "decoder" oder "all" - bestimmt welche Module propagiert werden
-            gc_interval: Garbage Collection alle N Queries (höher = schneller, mehr RAM)
-            
-        Returns:
-            Liste von LRPResult, eine pro Query
-        """
         import gc
         
         if not self._prepared:
@@ -721,6 +468,8 @@ class LRPController:
         finally:
             self.cleanup()
             gc.collect()
+            
+    # Erstellt Start-Relevanz für Encoder-LRP basierend auf einem spezifischen Encoder-Layer-Output
     
     def _get_encoder_start_relevance(
         self,
@@ -729,33 +478,13 @@ class LRPController:
         target_layer_index: Optional[int] = None,
         target_layer_name: Optional[str] = None,
     ) -> Tuple[Tensor, int]:
-        """Erstellt Start-Relevanz für Encoder-LRP basierend auf einem spezifischen Encoder-Layer-Output.
-        
-        Für Encoder-LRP beginnen wir mit dem Output des angegebenen Encoder-Layers.
-        Die Relevanz wird NUR auf den angegebenen Feature-Kanal initialisiert.
-        
-        WICHTIG: Für Layer-zu-Layer LRP muss target_layer_name oder target_layer_index den Layer angeben,
-        von dem aus wir die Relevanz zurückpropagieren wollen.
-        
-        Args:
-            feature_index: Kanal-Index für den die Relevanz gesetzt wird
-            normalize: Normalisierungsmethode
-            target_layer_index: 0-basierter Index des Encoder-Layers (in Propagationsreihenfolge).
-                               Wenn None, wird der letzte (erste in der Reihenfolge) verwendet.
-            target_layer_name: Name des Ziel-Layers. Wenn angegeben, hat dies Priorität über target_layer_index.
-            
-        Returns:
-            Tuple aus:
-            - R_start Tensor mit Shape (num_tokens, batch, hidden_dim) - passend für Encoder-Format
-            - prop_start_index: Der Index in der Propagationsreihenfolge, ab dem propagiert werden soll
-        """
         # Hole alle Encoder-Layer in Propagationsreihenfolge (rückwärts = letzter zuerst)
         encoder_layers = self.graph.get_lrp_propagation_order(which_module="encoder")
         if not encoder_layers:
             raise RuntimeError("Keine Encoder-Layer gefunden")
         
         # Wähle den richtigen Layer
-        prop_start_index = 0  # Standard: ab dem ersten Layer in der Propagationsreihenfolge
+        prop_start_index = 0
         target_module = None
         target_name = None
         
@@ -780,7 +509,7 @@ class LRPController:
             target_name, target_module = encoder_layers[target_layer_index]
             prop_start_index = target_layer_index
         else:
-            # Default: letzter Encoder-Layer (erster in der Propagationsreihenfolge)
+            # letzter Encoder-Layer
             target_name, target_module = encoder_layers[0]
             prop_start_index = 0
         
@@ -795,42 +524,26 @@ class LRPController:
         if activations.output is None:
             raise RuntimeError(f"Kein Output für {target_name} gespeichert")
         
-        # Output hat typisch Shape (num_tokens, batch, hidden_dim) = (T, B, C)
-        # OPTIMIZATION: Kein clone() - nur lesen, nicht schreiben
         encoder_output = activations.output
         
         if self.verbose:
             logger.debug(f"Encoder-Output Shape: {encoder_output.shape}")
         
-        # WICHTIG: Behalte das ursprüngliche Format (T, B, C) für die Propagation bei!
-        # Die LRP-Propagation erwartet dieses Format.
-        
-        # Erstelle Start-Relevanz im gleichen Format wie encoder_output
+        # Behalte das ursprüngliche Format (T, B, C) für die Propagation bei.
         R_start = torch.zeros_like(encoder_output)
-        
-        # Setze Relevanz NUR auf den spezifizierten Feature-Index
-        # encoder_output hat Shape (T, B, C) oder (B, T, C)
         if encoder_output.dim() == 3:
-            # Erkenne Format anhand der Batch-Dimension (normalerweise = 1)
             if encoder_output.shape[1] == 1:
-                # Format ist (T, B, C) - typisch für Encoder
-                # Setze Relevanz für alle Tokens, aber nur für feature_index
-                # Prüfe Bounds
                 if feature_index >= encoder_output.shape[2]:
                      raise IndexError(f"feature_index {feature_index} out of bounds for dimension 2 with size {encoder_output.shape[2]}")
                 R_start[:, :, feature_index] = encoder_output[:, :, feature_index].abs()
             else:
-                # Format könnte (B, T, C) sein
                 if feature_index >= encoder_output.shape[2]:
                      raise IndexError(f"feature_index {feature_index} out of bounds for dimension 2 with size {encoder_output.shape[2]}")
                 R_start[:, :, feature_index] = encoder_output[:, :, feature_index].abs()
         elif encoder_output.dim() == 2:
-            # (T, C) -> behandle wie (T, 1, C)
             if feature_index >= encoder_output.shape[1]:
                  raise IndexError(f"feature_index {feature_index} out of bounds for dimension 1 with size {encoder_output.shape[1]}")
             R_start[:, feature_index] = encoder_output[:, feature_index].abs()
-        
-        # Normalisieren
         if normalize == "sum1":
             total = R_start.sum()
             if total > 1e-12:
@@ -842,7 +555,6 @@ class LRPController:
         
         if self.verbose:
             logger.debug(f"Encoder R_start Shape: {R_start.shape}, Sum: {R_start.sum().item():.6f}")
-            # Debug: Zeige welche Kanäle Relevanz haben
             if R_start.dim() == 3:
                 channel_sums = R_start.sum(dim=(0, 1))
                 non_zero = (channel_sums > 1e-12).sum().item()
@@ -850,41 +562,28 @@ class LRPController:
         
         return R_start, prop_start_index
     
+    # Nun erstellen wir Start-Relevanz für Decoder Layer-zu-Layer LRP
+    
     def _get_decoder_start_relevance(
         self,
         query_index: int = 0,
         normalize: str = "sum1",
         target_layer_name: Optional[str] = None,
     ) -> Tuple[Tensor, int]:
-        """Erstellt Start-Relevanz für Decoder Layer-zu-Layer LRP.
-        
-        Analog zu _get_encoder_start_relevance, aber für Decoder-Layer.
-        Die Relevanz wird NUR auf die angegebene Query initialisiert.
-        
-        Args:
-            query_index: Query-Index für den die Relevanz gesetzt wird (0-299)
-            normalize: Normalisierungsmethode
-            target_layer_name: Name des Ziel-Decoder-Layers
-            
-        Returns:
-            Tuple aus:
-            - R_start Tensor mit Shape (num_queries, batch, hidden_dim) - passend für Decoder-Format
-            - prop_start_index: Der Index in der Propagationsreihenfolge, ab dem propagiert werden soll
-        """
-        # Hole alle Decoder-Layer in Propagationsreihenfolge (rückwärts = letzter zuerst)
+
+        # Hole alle Decoder-Layer in Propagationsreihenfolge
         decoder_layers = self.graph.get_lrp_propagation_order(which_module="decoder")
         if not decoder_layers:
             raise RuntimeError("Keine Decoder-Layer gefunden")
         
-        num_queries_expected = 300  # MaskDINO Standard
+        num_queries_expected = 300
         
         # Wähle den richtigen Layer
-        prop_start_index = 0  # Standard: ab dem ersten Layer in der Propagationsreihenfolge
+        prop_start_index = 0
         target_module = None
         target_name = None
         
         if target_layer_name is not None:
-            # Suche Layer nach Name
             for idx, (name, module) in enumerate(decoder_layers):
                 if name == target_layer_name or target_layer_name in name:
                     target_name = name
@@ -897,24 +596,19 @@ class LRPController:
                     f"Verfügbare Layer: {[n for n, _ in decoder_layers[:10]]}..."
                 )
         else:
-            # Default: letzter Decoder-Layer (erster in der Propagationsreihenfolge)
+            # letzter Decoder-Layer
             target_name, target_module = decoder_layers[0]
             prop_start_index = 0
         
         if self.verbose:
             logger.debug(f"Verwende Output von {target_name} als Decoder-Start (Prop-Index: {prop_start_index})")
         
-        # Versuche Aktivierungen vom Ziel-Layer zu holen
-        # Falls das nicht klappt (falsche Shape), suche nach einem passenden Layer
         decoder_output = None
         actual_layer_name = target_name
         actual_prop_index = prop_start_index
-        
-        # Strategie: Probiere erst den Ziel-Layer, dann suche nach alternativen
+
         layers_to_try = [(target_name, target_module, prop_start_index)]
-        
-        # Füge weitere Layer hinzu, die im gleichen Block liegen
-        # (z.B. wenn target ist "layers.0.norm1", probiere auch "layers.0.self_attn")
+
         target_block = '.'.join(target_layer_name.split('.')[:-1]) if target_layer_name else ""
         for idx, (name, module) in enumerate(decoder_layers):
             if name != target_name and target_block and target_block in name:
@@ -927,8 +621,6 @@ class LRPController:
             activations = try_module.activations
             if activations.output is None:
                 continue
-            
-            # OPTIMIZATION: Kein clone() - nur lesen
             output = activations.output
             
             # Prüfe ob die Shape passt
@@ -948,11 +640,9 @@ class LRPController:
             
             # Versuche auch die Input-Aktivierung
             if activations.input is not None:
-                # OPTIMIZATION: Kein clone() - nur lesen
                 inp = activations.input
                 if inp.dim() == 3:
                     if inp.shape[0] == num_queries_expected:
-                        # Kein clone() nötig - nur lesen
                         decoder_output = inp
                         actual_layer_name = try_name
                         actual_prop_index = try_idx
@@ -967,7 +657,7 @@ class LRPController:
                         break
         
         if decoder_output is None:
-            # Letzte Möglichkeit: Suche JEDEN Decoder-Layer mit passender Shape
+            # Suche JEDEN Decoder-Layer mit passender Shape
             for idx, (name, module) in enumerate(decoder_layers):
                 if not hasattr(module, 'activations') or module.activations is None:
                     continue
@@ -976,7 +666,6 @@ class LRPController:
                     if act is None:
                         continue
                     if act.dim() == 3 and act.shape[0] == num_queries_expected:
-                        # Kein clone() n\u00f6tig
                         decoder_output = act
                         actual_layer_name = name
                         actual_prop_index = idx
@@ -1009,7 +698,6 @@ class LRPController:
         if self.verbose:
             logger.debug(f"Decoder-Output von {actual_layer_name}, Shape: {decoder_output.shape}")
         
-        # Erstelle Start-Relevanz im gleichen Format wie decoder_output
         # Nur die angegebene Query erhält Relevanz, alle anderen = 0
         R_start = torch.zeros_like(decoder_output)
         
@@ -1020,8 +708,7 @@ class LRPController:
             if query_index < 0 or query_index >= num_queries:
                 raise IndexError(f"query_index {query_index} außerhalb [0, {num_queries-1}]")
             
-            # Setze Relevanz NUR für die spezifizierte Query
-            # Alle hidden_dim Dimensionen dieser Query erhalten die Aktivierungswerte
+            # Alle Dimensionen dieser Query erhalten die Aktivierungswerte
             R_start[query_index, :, :] = decoder_output[query_index, :, :].abs()
         elif decoder_output.dim() == 2:
             # (Q, C) -> behandle wie (Q, 1, C)
@@ -1047,20 +734,14 @@ class LRPController:
         
         return R_start, actual_prop_index
     
+    # Extrahiert die Decoder-Ausgabe für LRP-Start. Nutzt zuerst die via Hook gespeicherten Raw-Outputs
+    
     def _get_decoder_output(
         self,
         outputs: Dict,
         target_query: int,
     ) -> Tensor:
-        """Extrahiert Decoder-Ausgabe für LRP-Start.
-        
-        Für MaskDINO: Hole die Objekt-Query-Features.
-        Nutzt zuerst die via Hook gespeicherten Raw-Outputs (vor Post-Processing).
-        
-        WICHTIG: Gibt die Logits zurück und propagiert durch den Klassifikationskopf,
-        um die Decoder-Features (hidden_dim=256) zu erhalten.
-        """
-        # Priorität 1: Gespeicherte Raw-Outputs vom Decoder-Hook
+        # Gespeicherte Raw-Outputs vom Decoder-Hook
         logits = None
         if self._decoder_raw_outputs is not None:
             if "pred_logits" in self._decoder_raw_outputs:
@@ -1068,22 +749,19 @@ class LRPController:
                 if self.verbose:
                     logger.debug(f"Verwende Raw-Decoder-Outputs: pred_logits {tuple(logits.shape)}")
         
-        # Priorität 2: Versuche verschiedene Output-Strukturen
+        # Versuche verschiedene Output-Strukturen
         if logits is None and isinstance(outputs, dict):
             if "pred_logits" in outputs:
                 logits = outputs["pred_logits"]
         
         if logits is None:
-            # Fallback: Verwende ersten Tensor
+            # Verwende ersten Tensor
             if isinstance(outputs, Tensor):
                 return outputs
             for key, value in outputs.items():
                 if isinstance(value, Tensor):
                     return value[:, target_query:target_query+1, :] if value.dim() == 3 else value
             raise ValueError("Konnte keinen Tensor in outputs dict finden.")
-        
-        # Logits haben Shape (B, Q, num_classes) - wir brauchen Features (B, Q, hidden_dim)
-        # Propagiere durch den Klassifikationskopf zurück
         logits_selected = logits[:, target_query:target_query+1, :]  # (1, 1, num_classes)
         
         # Finde den class_embed Layer
@@ -1094,14 +772,9 @@ class LRPController:
                 break
         
         if class_embed is not None and hasattr(class_embed, 'weight'):
-            # class_embed ist ein Linear Layer: (hidden_dim -> num_classes)
-            # Für LRP zurückpropagieren: (1, 1, num_classes) -> (1, 1, hidden_dim)
             weight = class_embed.weight.detach().clone()  # (num_classes, hidden_dim)
             logits_for_proj = logits_selected.detach().clone()
-            
-            # Einfache Rückprojektion: R_in = R_out @ W (transponiert)
-            # Dies ist eine vereinfachte Version - für echtes LRP müssten wir die
-            # Aktivierungen des class_embed Layers während des Forward Pass speichern
+            # Aktivierungen des Layers während des Forward Pass speichern
             with torch.no_grad():
                 R_features = torch.einsum("btc,ch->bth", logits_for_proj, weight)  # (1, 1, hidden_dim)
             
@@ -1125,17 +798,8 @@ class LRPController:
             f"Raw-Decoder-Outputs verfügbar: {self._decoder_raw_outputs is not None}"
         )
 
-
-# =============================================================================
-# Exports
-# =============================================================================
-
-
 __all__ = [
-    # Hauptklasse
     "LRPController",
-    
-    # Re-exports für Abwärtskompatibilität (aus lrp_structs.py)
     "LRPResult",
     "LayerRelevance",
 ]

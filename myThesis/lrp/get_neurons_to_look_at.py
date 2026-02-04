@@ -6,38 +6,26 @@ import re
 from typing import Dict, List, Tuple
 
 
-# ------------------------------------------------------------
-# Pfade (relativ zum myThesis-Root)
-# ------------------------------------------------------------
-# Dieses Skript liegt unter myThesis/<irgendwo>; wir wollen den myThesis-Ordner.
-# Daher genau eine Ebene nach oben gehen.
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ENCODER_MIOU_BASE = os.path.join(
 	REPO_ROOT, "output", "encoder", "network_dissection"
 )
 DECODER_MIOU_BASE = os.path.join(
 	REPO_ROOT, "output", "decoder", "iou_results"
 )
-
 LRP_OUT_BASE = os.path.join(REPO_ROOT, "output", "lrp")
 
 
-# ------------------------------------------------------------
-# Hilfsfunktionen
-# ------------------------------------------------------------
 layer_dir_pattern = re.compile(r"^layer(\d+)$")
 
 
 def _ensure_dir(path: str) -> None:
 	os.makedirs(path, exist_ok=True)
 
+# Wir suchen nach Layer-Unterordnern und den entsprechenden CSV-Dateien
 
 def _find_layer_files(base_dir: str, filename: str) -> List[Tuple[int, str]]:
-	"""
-	Sucht unterhalb von base_dir nach Unterordnern "layer<idx>" und gibt
-	existierende Dateien (layer_idx, file_path) zurück, sortiert nach Layer.
-	"""
 	if not os.path.isdir(base_dir):
 		return []
 
@@ -74,21 +62,12 @@ def _safe_float(v: str, default: float = 0.0) -> float:
 	except Exception:
 		return default
 
+# Pro Layer lesen wir aus, welche Features die mIoU-Schwelle überschreiten
 
-# ------------------------------------------------------------
-# Encoder: Features über mIoU-Schwelle auslesen
-# ------------------------------------------------------------
 def collect_encoder_features_above_threshold(
 	threshold: float,
 	base_dir: str = ENCODER_MIOU_BASE,
 ) -> Dict[int, List[Dict[str, object]]]:
-	"""
-	Liest pro Layer die Datei "miou_network_dissection.csv" ein und filtert
-	die Features mit miou >= threshold.
-
-	Erwartete Spalten (aus calculate_IoU_for_encoder._write_network_dissection_csv):
-	- layer_idx, feature_idx, miou, nd_threshold, n_images, individual_ious, overlay_dir
-	"""
 	result: Dict[int, List[Dict[str, object]]] = {}
 
 	for layer_idx, csv_path in _find_layer_files(base_dir, "miou_network_dissection.csv"):
@@ -149,20 +128,12 @@ def save_encoder_selection(
 		json.dump(summary, f, indent=2, ensure_ascii=False)
 
 
-# ------------------------------------------------------------
-# Decoder: Queries über mIoU-Schwelle auslesen
-# ------------------------------------------------------------
+# Pro Layer lesen wir aus, welche Queries die mIoU-Schwelle überschreiten
+
 def collect_decoder_queries_above_threshold(
 	threshold: float,
 	base_dir: str = DECODER_MIOU_BASE,
 ) -> Dict[int, List[Dict[str, object]]]:
-	"""
-	Liest pro Layer die Datei "mIoU_per_Query.csv" ein und filtert die Queries
-	mit mean_iou >= threshold.
-
-	Erwartete Spalten (aus calculate_IoU_for_decoder.export_mean_iou_csv):
-	- query_idx, mean_iou, num_images
-	"""
 	result: Dict[int, List[Dict[str, object]]] = {}
 
 	for layer_idx, csv_path in _find_layer_files(base_dir, "mIoU_per_Query.csv"):
@@ -221,9 +192,6 @@ def save_decoder_selection(
 		json.dump(summary, f, indent=2, ensure_ascii=False)
 
 
-# ------------------------------------------------------------
-# Main / CLI
-# ------------------------------------------------------------
 def main() -> None:
 	parser = argparse.ArgumentParser(
 		description=(

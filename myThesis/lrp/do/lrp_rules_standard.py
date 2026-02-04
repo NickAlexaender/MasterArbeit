@@ -1,37 +1,12 @@
-"""
-LRP-Regeln für Residual, LayerNorm und Attention-Value-Pfad.
-
-Dieses Modul etabliert die "Grammatik" von LRP, implementiert als:
-    R_in = Σ R_out · (Beitrag des Neurons)
-
-Implementierte Regeln:
-    - ε-Regel: R_j = Σ_k (a_j · w_jk) / (Σ_j a_j · w_jk + ε) · R_k
-    - γ-Regel: R_j = Σ_k (a_j · (w_jk + γ·w_jk⁺)) / (Σ_j a_j · (w_jk + γ·w_jk⁺) + ε) · R_k
-    - LayerNorm: Korrekte Behandlung der Normalisierungsstatistiken (μ, σ²)
-
-Hinweis: Diese Implementierungen sind robuste, numerisch stabile Varianten
-und dienen als Bausteine für die LRPEngine.
-"""
 from __future__ import annotations
-
 from typing import Callable, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-
 from .tensor_ops import safe_divide
 
-
-# =============================================================================
-# Numerische Stabilität (verwendet safe_divide aus tensor_ops)
-# =============================================================================
-
-
-# =============================================================================
-# Standard LRP-Regeln (ε-Regel und γ-Regel)
-# =============================================================================
-
+# Hier implementieren wir Standard-LRP-Regeln für lineare Layer
 
 def lrp_epsilon_rule(
     a_in: Tensor,
@@ -40,28 +15,6 @@ def lrp_epsilon_rule(
     bias: Optional[Tensor] = None,
     eps: float = 1e-6,
 ) -> Tensor:
-    """Standard ε-Regel für lineare Layer (Linear, Conv2d).
-
-    Implementiert die generische LRP-Regel:
-        R_j = Σ_k (a_j · w_jk) / (Σ_j a_j · w_jk + ε) · R_k
-
-    Die ε-Regel ist numerisch stabil und verteilt Relevanz proportional
-    zum Beitrag jeder Eingabe zur Ausgabe.
-
-    Args:
-        a_in: Eingabe-Aktivierungen (B, ..., in_features).
-        weight: Gewichtsmatrix (out_features, in_features).
-        R_out: Ausgabe-Relevanz (B, ..., out_features).
-        bias: Optionaler Bias-Vektor (wird zum Nenner addiert).
-        eps: Stabilisierungsterm für numerische Sicherheit.
-
-    Returns:
-        R_in: Eingabe-Relevanz (B, ..., in_features).
-
-    Mathematik:
-        z_k = Σ_j a_j · w_jk + b_k    (Preaktivierung)
-        R_j = Σ_k (a_j · w_jk / (z_k + ε·sign(z_k))) · R_k
-    """
     # z = a @ W^T + b  (Preaktivierung)
     z = torch.einsum("...i,oi->...o", a_in, weight)
     if bias is not None:
@@ -76,6 +29,7 @@ def lrp_epsilon_rule(
 
     return a_in * c
 
+# Die γ-Regel verstärkt positive Beiträge -> w' = w + γ · w⁺   wobei w⁺ = max(0, w)
 
 def lrp_gamma_rule(
     a_in: Tensor,
@@ -85,30 +39,6 @@ def lrp_gamma_rule(
     gamma: float = 0.25,
     eps: float = 1e-6,
 ) -> Tensor:
-    """γ-Regel für lineare Layer mit verstärkten positiven Gewichten.
-
-    Die γ-Regel erhöht den Einfluss positiver Beiträge:
-        w' = w + γ · w⁺   wobei w⁺ = max(0, w)
-
-    Dies führt zu schärferen, weniger verrauschten Attributionen,
-    besonders nützlich in tieferen Schichten des Netzwerks.
-
-    Args:
-        a_in: Eingabe-Aktivierungen (B, ..., in_features).
-        weight: Gewichtsmatrix (out_features, in_features).
-        R_out: Ausgabe-Relevanz (B, ..., out_features).
-        bias: Optionaler Bias-Vektor.
-        gamma: Verstärkungsfaktor für positive Gewichte (Standard: 0.25).
-        eps: Stabilisierungsterm.
-
-    Returns:
-        R_in: Eingabe-Relevanz (B, ..., in_features).
-
-    Mathematik:
-        w'_jk = w_jk + γ · max(0, w_jk)
-        z'_k = Σ_j a_j · w'_jk + b_k
-        R_j = Σ_k (a_j · w'_jk / (z'_k + ε)) · R_k
-    """
     # Modifizierte Gewichte: w' = w + γ * w⁺
     w_pos = weight.clamp(min=0)
     w_modified = weight + gamma * w_pos
@@ -122,6 +52,7 @@ def lrp_gamma_rule(
     # Anwendung der ε-Regel mit modifizierten Gewichten
     return lrp_epsilon_rule(a_in, w_modified, R_out, b_modified, eps)
 
+# Die α-β-Regel behandelt positive und negative Beiträge separat. R_j = α · R_j⁺ - β · R_j⁻
 
 def lrp_alpha_beta_rule(
     a_in: Tensor,
@@ -132,28 +63,6 @@ def lrp_alpha_beta_rule(
     beta: float = 1.0,
     eps: float = 1e-6,
 ) -> Tensor:
-    """α-β-Regel: Separate Behandlung positiver und negativer Beiträge.
-
-    Verteilt Relevanz getrennt über positive und negative Aktivierungen:
-        R_j = α · R_j⁺ - β · R_j⁻
-
-    Typische Wahl: α=2, β=1 (LRP-α₂β₁) oder α=1, β=0 (LRP-z⁺).
-
-    Args:
-        a_in: Eingabe-Aktivierungen.
-        weight: Gewichtsmatrix.
-        R_out: Ausgabe-Relevanz.
-        bias: Optionaler Bias.
-        alpha: Gewichtung positiver Beiträge (Standard: 2.0).
-        beta: Gewichtung negativer Beiträge (Standard: 1.0).
-        eps: Stabilisierungsterm.
-
-    Returns:
-        R_in: Eingabe-Relevanz.
-
-    Note:
-        Für Konservativität sollte α - β = 1 gelten.
-    """
     a_pos = a_in.clamp(min=0)
     a_neg = a_in.clamp(max=0)
     w_pos = weight.clamp(min=0)
@@ -195,18 +104,6 @@ def lrp_linear(
     alpha: float = 2.0,
     beta: float = 1.0,
 ) -> Tensor:
-    """LRP für nn.Linear Layer mit wählbarer Regel.
-
-    Args:
-        layer: Das lineare Layer.
-        a_in: Eingabe-Aktivierungen.
-        R_out: Ausgabe-Relevanz.
-        rule: "epsilon", "gamma", oder "alpha_beta".
-        eps, gamma, alpha, beta: Regelparameter.
-
-    Returns:
-        R_in: Eingabe-Relevanz.
-    """
     weight = layer.weight.detach()
     bias = layer.bias.detach() if layer.bias is not None else None
 
@@ -220,9 +117,7 @@ def lrp_linear(
         raise ValueError(f"Unbekannte LRP-Regel: {rule}")
 
 
-# =============================================================================
-# Residual Split Strategien
-# =============================================================================
+# Wir teilen Relevanz Ry bei Residual-Verbindungen zwischen Skip-Pfad x und Transformationspfad F(x) auf.
 
 
 class ResidualSplitStrategy:
@@ -242,28 +137,6 @@ def residual_split(
     mode: str = "epsilon",
     eps: float = 1e-6,
 ) -> Tuple[Tensor, Tensor]:
-    """Teile Relevanz Ry zwischen Skip-Pfad x und Transformationspfad F(x) auf.
-
-    Bei Residual-Verbindungen y = x + F(x) muss die Relevanz Ry auf beide
-    Pfade verteilt werden. Diese Funktion implementiert verschiedene Strategien.
-
-    Strategien:
-        - identity: Pass-through (Ry wird komplett an x weitergegeben, F(x) = 0).
-        - epsilon: ε-Regel basierte Verteilung proportional zu x/(x+F(x)).
-        - energy: Proportional zu ||x||² vs. ||F(x)||² je Token.
-        - dotpos: Proportional zu positiven Skalarprodukten mit y = x + F(x).
-        - zsign: Vorzeichenbewahrende z-Regel auf Tokenebene.
-
-    Args:
-        x: Skip-Pfad Aktivierungen (B, T, C) oder (B, C).
-        Fx: Transformationspfad F(x) Aktivierungen.
-        Ry: Relevanz am Ausgang y = x + F(x).
-        mode: Strategie ("identity", "epsilon", "energy", "dotpos", "zsign").
-        eps: Stabilisierungsterm.
-
-    Returns:
-        (Rx, RFx): Relevanz-Tupel für Skip- und Transformationspfad.
-    """
     # Vereinheitliche Form (B, T, C)
     squeeze_output = False
     if x.dim() == 2:
@@ -325,10 +198,7 @@ def residual_split(
     return rx, rFx
 
 
-# =============================================================================
-# LayerNorm LRP-Regel (Korrekte Behandlung der Normalisierungsstatistiken)
-# =============================================================================
-
+# Jetzt implemnentieren wir die LRP-Regel für LayerNorm mit korrekter Behandlung der Normalisierungsstatistiken.
 
 def layernorm_lrp(
     x: Tensor,
@@ -339,40 +209,6 @@ def layernorm_lrp(
     ln_eps: float = 1e-5,
     lrp_eps: float = 1e-6,
 ) -> Tensor:
-    """LRP-Regel für LayerNorm mit korrekter Behandlung der Normalisierungsstatistiken.
-
-    LayerNorm ist nicht-linear aufgrund der Division durch die Varianz:
-        y = γ · (x - μ) / σ + β
-
-    wobei μ = mean(x), σ = sqrt(var(x) + ε).
-
-    Das naive Durchreichen der Relevanz ignoriert die Abhängigkeit von μ und σ²
-    von allen Eingaben und führt zu verrauschten Attributionen.
-
-    Implementierte Strategien:
-        - taylor: Taylor-Expansion 1. Ordnung (Gradient × Input).
-        - local_linear: Behandelt LN als lokal-linear mit festem μ, σ.
-        - zsign: Vorzeichenbewahrende z-Regel auf den normierten Beiträgen.
-        - conservative: Konservative Regel mit vollständiger Jacobi-Berechnung.
-
-    Args:
-        x: Eingabe vor LayerNorm (B, T, C) oder (B, C).
-        gamma: Skalierungsparameter γ (C,).
-        beta: Verschiebungsparameter β (C,).
-        R_out: Ausgabe-Relevanz (B, T, C) oder (B, C).
-        rule: LRP-Regel ("taylor", "local_linear", "zsign", "conservative").
-        ln_eps: Epsilon für LayerNorm (numerische Stabilität in σ).
-        lrp_eps: Epsilon für LRP-Regel.
-
-    Returns:
-        R_in: Eingabe-Relevanz mit gleicher Form wie x.
-
-    Mathematik (Taylor-Expansion):
-        Die Taylor-Expansion 1. Ordnung um den Arbeitspunkt x₀ ergibt:
-        R_j = x_j · ∂y/∂x_j · (R_out_j / y_j)
-
-        Für LayerNorm: ∂y_j/∂x_i = γ_j/σ · (δ_ij - 1/C - (x_j-μ)(x_i-μ)/(Cσ²))
-    """
     # Vereinheitliche Form (B, T, C)
     squeeze_output = False
     if x.dim() == 2:
@@ -492,6 +328,7 @@ def layernorm_lrp(
 
     return R_in
 
+# Wrapper um layernorm_lrp für Rückwärtskompatibilität
 
 def layernorm_backshare(
     x: Tensor,
@@ -501,28 +338,6 @@ def layernorm_backshare(
     rule: str = "taylor",
     eps: float = 1e-6,
 ) -> Tensor:
-    """Verteile Relevanz über LayerNorm-Eingang x (Legacy-Interface).
-
-    Diese Funktion ist ein Wrapper um layernorm_lrp für Rückwärtskompatibilität.
-
-    Unterstützte Regeln:
-        - "taylor": Taylor-Expansion (empfohlen, neu).
-        - "local_linear": Lokal-lineare Approximation (neu).
-        - "zsign": Vorzeichenbewahrende z-Regel (aktualisiert).
-        - "xmu": Proportional zu |x-μ| (Legacy, nicht empfohlen).
-        - "abs-grad-xmu": Absolutgradient × |x-μ| (Legacy).
-
-    Args:
-        x: Eingabe vor LayerNorm.
-        gamma: γ-Parameter.
-        beta: β-Parameter.
-        Ry: Ausgabe-Relevanz.
-        rule: LRP-Regel.
-        eps: Stabilisierungsterm.
-
-    Returns:
-        R_in: Eingabe-Relevanz.
-    """
     # Neue Regeln direkt an layernorm_lrp weiterleiten
     if rule in ("taylor", "local_linear", "zsign", "conservative"):
         return layernorm_lrp(x, gamma, beta, Ry, rule=rule, lrp_eps=eps)
@@ -560,11 +375,7 @@ def layernorm_backshare(
     else:
         raise ValueError(f"Unbekannte LayerNorm-Regel: {rule}")
 
-
-# =============================================================================
-# Attention Value Path LRP
-# =============================================================================
-
+# Wir erweitern LRP durch MSDeformAttn mit Value-Pfad-Berücksichtigung
 
 def value_path_split(
     Ro_j: Tensor,
@@ -574,18 +385,6 @@ def value_path_split(
     use_abs: bool | None = None,
     eps: float = 1e-6,
     ) -> Tensor:
-    """Verteilt Relevanz von Ausgabetoken t auf Quell-Token s über den Value-Pfad.
-
-    Parameter:
-    - Ro_j: (B,T,1) Relevanz für Zielkanal j pro Ziel-Token t
-    - attn_weights: (B,H,T,S)
-    - Vproj: (B,H,S,Dh)  Value-Projektionen je Head
-    - W_O_j: (H,Dh,1)    Spaltenvektor der Output-Projektion für Kanal j
-    - use_abs: None ⇒ vorzeichenbewahrende z-Regel; True ⇒ |.|-Gewichte; False ⇒ quadratische Gewichte
-
-    Rückgabe:
-    - Rs: (B,S,1) Relevanz auf die Quell-Token s aggregiert über t
-    """
     B, H, T, S = attn_weights.shape
     # Effektiver signed Beitrag Z_{t,s} = sum_h a_{t,s,h} * <V_{s,h}, W_O_j[h]>
     # score_h: (B,S,1); nach Broadcast -> (B,T,S,1)
@@ -617,6 +416,7 @@ def value_path_split(
         Rs = (w * Ro_j).sum(dim=1)                           # (B,S,1)
         return Rs
 
+# Nun verteilen wir die Relevanz durch den Value-Pfad der Deformable Attention zurück auf die Quelle
 
 def value_path_split_deform(
     Ro_j: Tensor,
@@ -625,20 +425,6 @@ def value_path_split_deform(
     spatial_shapes: Tensor,
     level_start_index: Tensor,
 ) -> Tensor:
-    """Verteile Relevanz von Ziel-Tokens t zurück auf Quelle S der MSDeformAttn.
-
-    Bilineares "Splatting" der attention_weights auf 4 Nachbarn je Sample-Punkt.
-
-    Parameter:
-    - Ro_j: (B,T,1) Relevanz auf Ziel-Tokens (z. B. aus rFx_scalar für gewählten Kanal)
-    - sampling_locations: (B,T,H,L,P,2) normierte Koordinaten je Level in [0,1]
-    - attention_weights: (B,T,H,L,P) zugehörige Gewichte (>=0, Summe über P typ. 1)
-    - spatial_shapes: (L,2) je Level (H_l, W_l)
-    - level_start_index: (L,) Start-Offsets pro Level in der flachen S-Dimension
-
-    Rückgabe:
-    - Rs: (B,S,1) Relevanz auf Quelle (über T/H/L/P aggregiert)
-    """
     B, T, Hh, L, P, _ = sampling_locations.shape
     device = sampling_locations.device
     dtype = sampling_locations.dtype
@@ -704,18 +490,14 @@ def value_path_split_deform(
 
 
 __all__ = [
-    # Standard LRP-Regeln
     "lrp_epsilon_rule",
     "lrp_gamma_rule",
     "lrp_alpha_beta_rule",
     "lrp_linear",
-    # Residual-Split
     "ResidualSplitStrategy",
     "residual_split",
-    # LayerNorm LRP
     "layernorm_lrp",
-    "layernorm_backshare",  # Legacy-Interface
-    # Attention Value Path
+    "layernorm_backshare",
     "value_path_split",
     "value_path_split_deform",
 ]

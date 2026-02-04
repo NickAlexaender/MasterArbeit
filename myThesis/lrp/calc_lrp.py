@@ -1,60 +1,23 @@
-"""
-LRP/Attributions-Analyse für MaskDINO-Transformer Encoder/Decoder.
-
-Dieses Script ist der zentrale Einstiegspunkt für Layer-wise Relevance Propagation (LRP)
-Analysen auf MaskDINO-Modellen.
-
-Funktion:
-- Lädt das MaskDINO-Modell (wie in myThesis/fine-tune.py konfiguriert)
-- Führt eine Attribution (LRP) für ein wählbares Encoder-/Decoder-Layer
-  und ein bestimmtes Feature (Kanalindex) durch
-- Aggregiert Beiträge der vorherigen Features (Kanäle) über alle Bilder im Ordner
-- Exportiert Ergebnisse als CSV-Datei
-
-Nutzbar von:
-- myThesis/test.py: Einzelne LRP-Analysen für Top-Features
-- myThesis/lrp/calculate_network.py: Batch-LRP über mehrere Features/Layer
-
-Beispiel:
-    >>> from myThesis.lrp import calc_lrp
-    >>> calc_lrp.main(
-    ...     images_dir="path/to/images",
-    ...     layer_index=3,  # 1-basiert
-    ...     feature_index=214,
-    ...     which_module="encoder",
-    ...     output_csv="output/result.csv",
-    ...     weights_path="path/to/model.pth",
-    ... )
-"""
-
 from __future__ import annotations
-
-# Warnungen unterdrücken (FutureWarnings von timm, torch.cuda.amp etc.)
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning, message=".*torch.meshgrid.*")
-
-# WICHTIG: Kompatibilitäts-Patches müssen zuerst geladen werden
 from myThesis.lrp.do.compat import *  # Pillow/NumPy monkey patches
-
 import gc
 import logging
 import os
 import random
 from typing import List, Optional
-
 import numpy as np
 import pandas as pd
 import PIL.Image
 import torch
 from torch import Tensor
-
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.data import MetadataCatalog
 from detectron2.data import transforms as T
 from detectron2.modeling import build_model
 from detectron2.utils.logger import setup_logger as setup_d2_logger
-
 from myThesis.lrp.do.cli import parse_args
 from myThesis.lrp.do.config import (
     DETERMINISTIC,
@@ -75,28 +38,16 @@ from myThesis.lrp.do.model_graph_wrapper import (
     list_encoder_like_layers,
 )
 from myThesis.lrp.do.tensor_ops import aggregate_channel_relevance, build_target_relevance
-
-# Import der zentralen Modell-Konfiguration
 from myThesis.model_config import get_model_config, get_classes, get_dataset_name
 
-# Logger für dieses Modul
 logger = logging.getLogger("lrp.calc")
 
-# Globaler Cache für Modell-Wiederverwendung
 _MODEL_CACHE: dict = {}
-
-# Globaler Cache für Forward Pass Aktivierungen (OPTIMIZATION: Forward Pass Caching)
-# Format: {(images_dir, which_module, layer_index): {'activations': tensor, 'batched_inputs': list}}
 _FORWARD_PASS_CACHE: dict = {}
 
 
-# =============================================================================
-# Hilfsfunktionen
-# =============================================================================
-
 
 def _setup_determinism(seed: int = SEED, strict: bool = DETERMINISTIC) -> None:
-    """Setzt Zufallsgeneratoren für reproduzierbare Ergebnisse."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -110,7 +61,6 @@ def _setup_determinism(seed: int = SEED, strict: bool = DETERMINISTIC) -> None:
 
 
 def _register_model_metadata(model: str = "car") -> None:
-    """Registriert die Klassen für Metadaten (optional)."""
     try:
         config = get_model_config(model)
         dataset_name = config["dataset_name"]
@@ -121,7 +71,6 @@ def _register_model_metadata(model: str = "car") -> None:
 
 
 def _normalize_tensor(R: Tensor, mode: str) -> Tensor:
-    """Normalisiert einen Relevanz-Tensor."""
     if mode == "sum1":
         return R / (R.sum() + 1e-12)
     elif mode == "sumAbs1":
@@ -130,15 +79,6 @@ def _normalize_tensor(R: Tensor, mode: str) -> Tensor:
 
 
 def _aggregate_relevance(vec: Tensor, axis: str) -> Tensor:
-    """Aggregiert Relevanz nach Kanal oder Token.
-    
-    Args:
-        vec: Relevanz-Tensor
-        axis: 'channel' oder 'token'
-        
-    Returns:
-        Aggregierter 1D-Tensor
-    """
     if axis == "channel":
         return aggregate_channel_relevance(vec)
     
@@ -168,19 +108,9 @@ def _aggregate_relevance(vec: Tensor, axis: str) -> Tensor:
         except Exception:
             return vec.reshape(-1)
 
+# Wir wollen das Modell machmal aus dem Cach laden/holen
 
 def _get_or_load_model(weights_path: str, device: str = "cpu", use_cache: bool = True, model_type: str = "car"):
-    """Lädt oder holt das Modell aus dem Cache.
-    
-    Args:
-        weights_path: Pfad zu den Modellgewichten.
-        device: Gerät ('cpu' oder 'cuda').
-        use_cache: Wenn True, wird das Modell gecacht und wiederverwendet.
-        model_type: Modelltyp ('car' oder 'butterfly').
-        
-    Returns:
-        Tuple aus (model, cfg)
-    """
     global _MODEL_CACHE
     
     cache_key = (weights_path, device, model_type)
@@ -209,9 +139,9 @@ def _get_or_load_model(weights_path: str, device: str = "cpu", use_cache: bool =
     
     return model, cfg
 
+# Speicher muss frei gegeben werden
 
 def clear_model_cache():
-    """Löscht den Modell-Cache und gibt Speicher frei."""
     global _MODEL_CACHE
     _MODEL_CACHE.clear()
     gc.collect()
@@ -221,7 +151,6 @@ def clear_model_cache():
 
 
 def clear_forward_pass_cache():
-    """Löscht den Forward Pass Cache und gibt Speicher frei."""
     global _FORWARD_PASS_CACHE
     _FORWARD_PASS_CACHE.clear()
     gc.collect()
@@ -229,6 +158,7 @@ def clear_forward_pass_cache():
         torch.cuda.empty_cache()
     logger.info("Forward Pass Cache geleert")
 
+# aufteilung von Bildern in Branches
 
 def _prepare_batched_inputs_from_images(
     img_files: List[str],
@@ -236,17 +166,6 @@ def _prepare_batched_inputs_from_images(
     batch_size: int = 4,
     device: str = "cpu"
 ) -> List[List[dict]]:
-    """Lädt Bilder und teilt sie in Batches auf.
-    
-    Args:
-        img_files: Liste von Bildpfaden
-        cfg: Model-Konfiguration (für INPUT.FORMAT etc.)
-        batch_size: Bilder pro Batch
-        device: Torch device
-        
-    Returns:
-        Liste von Batches, wobei jeder Batch eine Liste von dicts mit 'image', 'height', 'width' ist
-    """
     resize_aug = T.ResizeShortestEdge(
         short_edge_length=getattr(cfg.INPUT, "MIN_SIZE_TEST", 800),
         max_size=getattr(cfg.INPUT, "MAX_SIZE_TEST", 1333),
@@ -293,11 +212,8 @@ def _prepare_batched_inputs_from_images(
     
     return all_batches
 
-
-# =============================================================================
-# Haupt-Analyse-Funktion
-# =============================================================================
-
+# Führt die vollständige LRP-Analyse durch.
+# Diese Funktion lädt das MaskDINO-Modell, verarbeitet alle Bilder in einem Verzeichnis, berechnet LRP-Attributionen für ein spezifisches Layer/Feature, und exportiert die Ergebnisse als CSV.
 
 def run_analysis(
     images_dir: str,
@@ -316,36 +232,6 @@ def run_analysis(
     model_type: str = "car",
     batch_size: int = 1,
 ) -> pd.DataFrame:
-    """Führt die vollständige LRP-Analyse durch.
-    
-    Diese Funktion lädt das MaskDINO-Modell, verarbeitet alle Bilder in einem
-    Verzeichnis, berechnet LRP-Attributionen für ein spezifisches Layer/Feature,
-    und exportiert die Ergebnisse als CSV.
-    
-    Args:
-        images_dir: Pfad zum Ordner mit Eingabebildern.
-        layer_index: 1-basierter Index des Encoder-/Decoder-Layers.
-        feature_index: Kanal-/Token-Index für die Attribution.
-        output_csv: Pfad für die Ausgabe-CSV-Datei.
-        target_norm: Normalisierungsmethode ('sum1', 'sumAbs1', 'none').
-        lrp_epsilon: Epsilon für numerische Stabilität.
-        which_module: 'encoder' oder 'decoder'.
-        method: Attributionsmethode (nur 'lrp' unterstützt).
-        index_kind: 'auto', 'channel', oder 'token'.
-        weights_path: Optionaler Pfad zu Modellgewichten.
-        verbose: Ausführliche Logging-Ausgabe.
-        num_queries: Anzahl der Decoder-Queries (Standard: 300 für MaskDINO).
-        use_model_cache: Modell cachen für Wiederverwendung (spart ~10s bei mehreren Aufrufen).
-        model_type: Modelltyp ('car' oder 'butterfly').
-        batch_size: Anzahl der Bilder pro Batch (Standard: 4). Höhere Werte = schneller, aber mehr RAM.
-        
-    Returns:
-        DataFrame mit den aggregierten Relevanzwerten.
-        
-    Raises:
-        FileNotFoundError: Wenn keine Bilder oder Gewichte gefunden werden.
-        ValueError: Bei ungültigen Parametern.
-    """
     print("LRP startet")
     # logger.info("Starte LRP/Attribution-Analyse...")
     
@@ -389,7 +275,7 @@ def run_analysis(
                 if "TransformerEncoderLayer" in cls_name or "TransformerDecoderLayer" in cls_name:
                     enc_layers.append((node.name, node.module))
             
-            # Fallback: if no blocks found (unlikely), use all
+            # if no blocks found (unlikely), use all
             if not enc_layers:
                 enc_layers = [(n.name, n.module) for n in all_enc_nodes]
                 
@@ -435,7 +321,7 @@ def run_analysis(
     controller = LRPController(model, device=device, eps=lrp_epsilon, verbose=False)
     controller.prepare(swap_linear=True)
     
-    # NEU: Decoder und Encoder arbeiten jetzt gleich - Layer-zu-Layer LRP
+    # Decoder und Encoder arbeiten jetzt gleich - Layer-zu-Layer LRP
     # für eine einzelne Query/Feature, die Relevanz auf vorherige Queries/Features verteilt
     compute_all_queries = False  # Alte Logik deaktiviert
     queries_to_compute = 1
@@ -446,8 +332,6 @@ def run_analysis(
     # agg_attr_per_query[q] enthält die aggregierte Relevanz für Query q
     agg_attr_per_query: List[Optional[Tensor]] = [None] * queries_to_compute
     processed = 0
-    
-    # OPTIMIZATION: Forward Pass Caching - Check ob schon Aktivierungen für diesen Layer/Bilder existieren
     cache_key = (images_dir, which_module, layer_index, tuple(sorted(img_files)))
     forward_pass_cached = False
     if cache_key in _FORWARD_PASS_CACHE:
@@ -456,7 +340,6 @@ def run_analysis(
         cached_data = _FORWARD_PASS_CACHE[cache_key]
         # cached_data wird später verwendet um Backward Pass schneller zu machen
     
-    # OPTIMIZATION: Batch-Verarbeitung von Bildern
     num_images = len(img_files)
     num_batches = (num_images + batch_size - 1) // batch_size
     
@@ -470,7 +353,7 @@ def run_analysis(
         
         # Verarbeite den gesamten Batch auf einmal
         try:
-            # NEU: Einheitliche Layer-zu-Layer LRP für beide Module (Encoder und Decoder)
+            # Einheitliche Layer-zu-Layer LRP für beide Module (Encoder und Decoder)
             # chosen_name ist der Layer, von dem aus wir die Relevanz zurückpropagieren wollen
             # feature_index ist der Query-Index (Decoder) oder Kanal-Index (Encoder)
             result = controller.run(
@@ -478,9 +361,9 @@ def run_analysis(
                 target_class=None,
                 target_query=feature_index if which_module == "decoder" else 0,  # Query-Index für Decoder
                 normalize="none",
-                which_module=which_module,  # "encoder" oder "decoder"
-                target_feature=feature_index,  # Kanal-Index für Encoder, Query für Decoder
-                target_layer_name=chosen_name,  # Name des Ziel-Layers für Layer-zu-Layer LRP
+                which_module=which_module,
+                target_feature=feature_index,
+                target_layer_name=chosen_name,
             )
                 
             if result.R_input is None:
@@ -505,8 +388,6 @@ def run_analysis(
         except Exception as e:
             logger.exception(f"Fehler bei Batch {batch_idx+1}: {e}")
             continue
-    
-    # OPTIMIZATION: Speicher nur am Ende aufräumen (nicht nach jedem Bild/Batch - das ist zu teuer)
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -528,9 +409,7 @@ def run_analysis(
         if agg_attr_per_query[q] is not None:
             vec_len = len(agg_attr_per_query[q])
             break
-    
-    # logger.info(f"Aggregation abgeschlossen: {processed} Bilder, Vektor-Länge: {vec_len}, Queries: {queries_to_compute}")
-    
+
     # DataFrame erstellen - einheitliches Format für Encoder und Decoder
     # prev_feature_idx zeigt die Relevanz der vorherigen Features/Queries
     agg_attr = agg_attr_per_query[0]
@@ -572,10 +451,7 @@ def run_analysis(
     return df
 
 
-# =============================================================================
-# Hauptfunktion für externe Aufrufe
-# =============================================================================
-
+# Wir müssen einen einstiegspunkt bereitstellen, damit wir je nach Modell und co. sachen einstellen können.
 
 def main(
     images_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/1images",
@@ -593,35 +469,6 @@ def main(
     model_type: str = "car",
     batch_size: int = 1,
 ) -> pd.DataFrame:
-    """Programmierbarer Einstiegspunkt für LRP-Analyse.
-    
-    Wird von myThesis/test.py und myThesis/lrp/calculate_network.py aufgerufen.
-    
-    Hinweise:
-    - `layer_index` ist 1-basiert (intuitiver für Nutzer).
-    - Gibt einen DataFrame mit den Ergebnissen zurück.
-    - Für Decoder (which_module='decoder'): Berechnet Relevanz für alle `num_queries` Queries.
-    - `use_model_cache=True` beschleunigt wiederholte Aufrufe (Modell wird nur einmal geladen).
-    
-    Args:
-        images_dir: Pfad zum Bildordner.
-        layer_index: 1-basierter Layer-Index.
-        feature_index: Kanal-/Token-Index.
-        target_norm: Normalisierung ('sum1', 'sumAbs1', 'none').
-        lrp_epsilon: Epsilon für Stabilität.
-        output_csv: Ausgabepfad für CSV.
-        which_module: 'encoder' oder 'decoder'.
-        method: Nur 'lrp' unterstützt.
-        weights_path: Optionaler Pfad zu Modellgewichten.
-        verbose: Ausführliches Logging.
-        num_queries: Anzahl der Decoder-Queries (Standard: 300 für MaskDINO).
-        use_model_cache: Modell cachen für schnellere wiederholte Aufrufe.
-        model_type: Modelltyp ('car' oder 'butterfly').
-        batch_size: Anzahl der Bilder pro Batch (Standard: 4). Höhere Werte = schneller, aber mehr RAM.
-        
-    Returns:
-        DataFrame mit Relevanzwerten.
-    """
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     
     return run_analysis(
@@ -640,12 +487,6 @@ def main(
         model_type=model_type,
         batch_size=batch_size,
     )
-
-
-# =============================================================================
-# CLI-Einstiegspunkt
-# =============================================================================
-
 
 if __name__ == "__main__":
     _args = parse_args()

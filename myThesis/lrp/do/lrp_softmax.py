@@ -1,31 +1,10 @@
-"""
-LRP-Regeln für Softmax-Layer.
-
-Diese Datei implementiert die mathematisch anspruchsvollste Komponente der
-Attention-LRP: die Rückpropagation durch die Softmax-Nichtlinearität.
-
-Mathematischer Hintergrund:
-    Softmax: A = softmax(S) mit A_ts = exp(S_ts) / Σ_s' exp(S_ts')
-    
-    Die Jacobi-Matrix des Softmax ist:
-        ∂A_ts/∂S_tk = A_ts · (δ_sk - A_tk)
-    
-    Dies führt zu spezifischen LRP-Regeln für den Softmax-Layer.
-
-Implementierte Regeln:
-    - "gradient": Gradient × Input (Taylor-Expansion 1. Ordnung)
-    - "epsilon": ε-Regel mit Score-Beiträgen
-    - "weighted": Gewichtete Attribution basierend auf Score-Magnitude
-    - "jacobian": Exakte Berechnung via vollständige Jacobi-Matrix
-"""
 from __future__ import annotations
-
 from typing import Literal
 import torch
 from torch import Tensor
-
 from myThesis.lrp.do.tensor_ops import safe_divide
 
+# LRP-Regel für Softmax-Schicht in Attention-Mechanismen
 
 def lrp_softmax(
     R_A: Tensor,
@@ -34,39 +13,6 @@ def lrp_softmax(
     rule: Literal["gradient", "epsilon", "weighted"] = "gradient",
     eps: float = 1e-6,
 ) -> Tensor:
-    """LRP-Regel für Softmax: Propagiert Relevanz von A zu Scores S.
-    
-    Softmax: A = softmax(S) mit A_ts = exp(S_ts) / Σ_s' exp(S_ts')
-    
-    Die Jacobi-Matrix des Softmax ist:
-        ∂A_ts/∂S_tk = A_ts · (δ_sk - A_tk)
-    
-    Dies ergibt spezielle LRP-Regeln für die Softmax-Schicht.
-    
-    Implementierte Regeln:
-        - "gradient": Gradient × Input (Taylor-Expansion 1. Ordnung)
-        - "epsilon": ε-Regel mit Score-Beiträgen
-        - "weighted": Gewichtete Attribution basierend auf Score-Magnitude
-    
-    Args:
-        R_A: Relevanz der Attention-Gewichte (B, H, T, S)
-        attn_weights: Attention-Gewichte A = softmax(S) (B, H, T, S)
-        attn_scores: Rohe Attention-Scores S = QK^T/√d (B, H, T, S)
-        rule: LRP-Regel für Softmax
-        eps: Stabilisierungsterm
-        
-    Returns:
-        R_S: Relevanz der Attention-Scores (B, H, T, S)
-        
-    Mathematik (Gradient-Regel):
-        Die Softmax-Jacobi-Matrix für eine Zeile ist:
-        J_jk = A_j(δ_jk - A_k) = A_j·δ_jk - A_j·A_k
-        
-        Für LRP berechnen wir:
-        R_S[k] = S[k] · Σ_j J_jk · (R_A[j] / A[j])
-               = S[k] · Σ_j (A_j·δ_jk - A_j·A_k) · (R_A[j] / A[j])
-               = S[k] · (R_A[k] - A_k · Σ_j R_A[j])
-    """
     B, H, T, S_dim = R_A.shape
     
     if rule == "gradient":
@@ -129,24 +75,6 @@ def lrp_softmax_jacobian(
     attn_scores: Tensor,
     eps: float = 1e-6,
 ) -> Tensor:
-    """Exakte Softmax-LRP via vollständige Jacobi-Matrix-Berechnung.
-    
-    Berechnet die exakte Relevanz-Rückpropagation durch Softmax unter
-    Verwendung der analytischen Jacobi-Matrix.
-    
-    Args:
-        R_A: Relevanz der Attention-Gewichte (B, H, T, S)
-        attn_weights: Attention-Gewichte A (B, H, T, S)
-        attn_scores: Attention-Scores S (B, H, T, S)
-        eps: Stabilisierungsterm
-        
-    Returns:
-        R_S: Relevanz der Scores (B, H, T, S)
-        
-    Note:
-        Diese Methode ist rechenintensiver als die approximativen Regeln,
-        aber garantiert exakte Relevanz-Erhaltung.
-    """
     B, H, T, S_dim = R_A.shape
     
     # Jacobi-Matrix für Softmax: J_jk = A_j(δ_jk - A_k)

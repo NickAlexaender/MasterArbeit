@@ -1,32 +1,8 @@
-"""
-LRP-Regeln für MSDeformAttn (Multi-Scale Deformable Attention).
-
-Dieses Modul ist der Einstiegspunkt für Deformable Attention LRP und enthält
-die High-Level Regeln. Die mathematischen Operationen werden aus lrp_deform_ops
-importiert, das Aktivierungs-Capturing aus lrp_deform_capture.
-
-MSDeformAttn sampelt Werte an vorhergesagten Lokationen p_q + Δp_{mqk} mit
-Attention-Gewichten A_{mqk}. Da bilineare Interpolation verwendet wird:
-    x(p) = Σ_i g(p, p_i) · x_i
-
-muss die Relevanz entsprechend auf die 4 nächsten Integer-Pixel verteilt werden:
-    R_pixel = R_output · W_attn · W_bilinear
-
-Hauptfunktionen:
-    - msdeform_attn_lrp: Hauptfunktion zur Relevanz-Rückpropagation
-    - msdeform_attn_lrp_with_value: Erweiterte LRP mit Value-Pfad
-    - deform_value_path_lrp: Value-Path LRP für einen Kanal
-"""
 from __future__ import annotations
-
 from typing import Optional
-
 import torch
 from torch import Tensor
-
 from .tensor_ops import safe_divide
-
-# Import der mathematischen Operationen
 from .lrp_deform_ops import (
     compute_bilinear_weights,
     compute_bilinear_corners,
@@ -36,19 +12,13 @@ from .lrp_deform_ops import (
     compute_pixel_relevance_map,
     compute_multiscale_relevance_map,
 )
-
-# Import der Capture-Funktionen
 from .lrp_deform_capture import (
     attach_msdeformattn_capture,
     _resolve_msdeformattn_class,
     _ForwardPatchHandle,
 )
-
-
-# =============================================================================
-# Haupt-LRP-Funktion für MSDeformAttn
-# =============================================================================
-
+# Wir führen nun LRP durch MSDeformAttn mit bilinearer Interpolations-Dekomposition durch. Herzstück der Deformable Attention LRP
+# -> R_pixel = R_output · W_attn · W_bilinear
 
 def msdeform_attn_lrp(
     R_out: Tensor,
@@ -62,46 +32,6 @@ def msdeform_attn_lrp(
     use_value_weighting: bool = False,
     eps: float = 1e-9,
 ) -> Tensor:
-    """Führt LRP durch MSDeformAttn mit Bilinear-Interpolations-Dekomposition durch.
-    
-    Diese Funktion ist das Herzstück der Deformable Attention LRP. Sie verteilt
-    Relevanz von den Ausgabe-Tokens zurück auf die Eingabe-Feature-Map-Pixel
-    unter Berücksichtigung der:
-    
-    1. Attention-Gewichte A_{mqk}: Wie stark jeder Sampling-Punkt gewichtet wird
-    2. Bilinearen Interpolation: Wie die Sampling-Positionen auf Integer-Pixel abgebildet werden
-    3. Multi-Scale Struktur: Verschiedene Auflösungsebenen der Feature-Pyramide
-    
-    Die mathematische Formel lautet:
-        R_pixel = R_output · W_attn · W_bilinear
-    
-    wobei:
-        - R_output: Relevanz am Ausgang der Attention
-        - W_attn: Attention-Gewichte A_{mqk}
-        - W_bilinear: Bilineare Interpolationsgewichte basierend auf der Distanz
-    
-    Args:
-        R_out: Ausgabe-Relevanz (B, T, C) wobei T die Query-Länge ist
-        sampling_locations: Normierte Sampling-Positionen (B, T, H, L, P, 2)
-            - H: Anzahl der Attention-Köpfe
-            - L: Anzahl der Scale-Levels
-            - P: Anzahl der Sampling-Punkte pro Level
-            - 2: (x, y) Koordinaten in [0, 1]
-        attention_weights: Attention-Gewichte (B, T, H, L, P), Summe über P ≈ 1
-        spatial_shapes: (L, 2) Dimensionen (H_l, W_l) pro Level
-        level_start_index: (L,) Start-Indizes pro Level in flacher Darstellung
-        value_features: Optional (B, S, C) Value-Projektionen für gewichtete Verteilung
-        W_V: Optional (H, D_h, C) Value-Projektionsgewichte
-        W_O: Optional (H, D_h, C) Output-Projektionsgewichte
-        use_value_weighting: Falls True, werden Value-Features einbezogen
-        eps: Numerische Stabilisierung
-    
-    Returns:
-        R_source: (B, S, C) Relevanz auf den Quell-Tokens der flachen Feature-Map
-        
-    Hinweis:
-        S = Σ_l H_l × W_l ist die Gesamtzahl der Quell-Tokens über alle Levels
-    """
     B, T, H_heads, L, P, _ = sampling_locations.shape
     device = sampling_locations.device
     dtype = R_out.dtype
@@ -148,6 +78,8 @@ def msdeform_attn_lrp(
     return R_source
 
 
+# Wir erweitern LRP durch MSDeformAttn mit Value-Pfad-Berücksichtigung
+
 def msdeform_attn_lrp_with_value(
     R_out: Tensor,
     sampling_locations: Tensor,
@@ -159,28 +91,6 @@ def msdeform_attn_lrp_with_value(
     W_O: Tensor,
     eps: float = 1e-9,
 ) -> Tensor:
-    """Erweiterte LRP mit Value-Pfad-Berücksichtigung.
-    
-    Diese Variante berücksichtigt nicht nur Attention und bilineare Gewichte,
-    sondern auch den Beitrag der Value-Projektionen W_V und W_O.
-    
-    Formel:
-        R_pixel = R_output · W_attn · W_bilinear · |V · W_O|
-    
-    Args:
-        R_out: (B, T, C) Ausgabe-Relevanz
-        sampling_locations: (B, T, H, L, P, 2) Sampling-Positionen
-        attention_weights: (B, T, H, L, P) Attention-Gewichte
-        spatial_shapes: (L, 2) Feature-Map-Größen
-        level_start_index: (L,) Start-Indizes
-        value_features: (B, S, C) Value-Projektionen
-        W_V: (H, D_h, C) Value-Gewichte
-        W_O: (H, D_h, C) Output-Gewichte
-        eps: Stabilisierung
-    
-    Returns:
-        R_source: (B, S, C) Relevanz auf Quell-Tokens
-    """
     B, T, H_heads, L, P, _ = sampling_locations.shape
     device = sampling_locations.device
     dtype = R_out.dtype
@@ -222,10 +132,7 @@ def msdeform_attn_lrp_with_value(
     return R_source
 
 
-# =============================================================================
-# Value-Path LRP für Deformable Attention
-# =============================================================================
-
+# Wir müssen Relevanz durch den Value-Pfad der Deformable Attention zurückpropagieren
 
 def deform_value_path_lrp(
     R_channel: Tensor,
@@ -238,30 +145,6 @@ def deform_value_path_lrp(
     W_O: Optional[Tensor] = None,
     eps: float = 1e-9,
 ) -> Tensor:
-    """Verteilt Relevanz eines Output-Kanals zurück auf Quell-Tokens via Value-Pfad.
-    
-    Implementiert die vollständige LRP-Rückpropagation durch den Value-Pfad
-    der Deformable Attention:
-    
-        out_c = Σ_{m,q,k} A_{mqk} × bilinear_sample(V_proj, p_{mqk}) × W_O[h,d,c]
-    
-    Die Relevanz R_c für Kanal c wird verteilt als:
-        R_source = R_c × A × W_bilinear × |V × W_O_c|
-    
-    Args:
-        R_channel: (B, T, 1) Relevanz für einen spezifischen Output-Kanal
-        sampling_locations: (B, T, H, L, P, 2) Sampling-Positionen
-        attention_weights: (B, T, H, L, P) Attention-Gewichte
-        value_proj: (B, S, H, D_h) projizierte Values
-        spatial_shapes: (L, 2) Feature-Map-Größen
-        level_start_index: (L,) Start-Indizes
-        W_V: (H, D_h, C) Value-Projektion
-        W_O: (H, D_h, C) Output-Projektion
-        eps: Stabilisierung
-    
-    Returns:
-        R_source: (B, S, 1) Relevanz auf Quell-Tokens
-    """
     B, T, H_heads, L, P, _ = sampling_locations.shape
     device = sampling_locations.device
     dtype = R_channel.dtype
@@ -322,23 +205,13 @@ def deform_value_path_lrp(
     
     return R_source
 
-
-# =============================================================================
-# Exports
-# =============================================================================
-
 __all__ = [
-    # Capture-Funktionen (re-export aus lrp_deform_capture)
     "attach_msdeformattn_capture",
     "_resolve_msdeformattn_class",
     "_ForwardPatchHandle",
-    
-    # Haupt-LRP-Funktionen
     "msdeform_attn_lrp",
     "msdeform_attn_lrp_with_value",
     "deform_value_path_lrp",
-    
-    # Operationen (re-export aus lrp_deform_ops)
     "bilinear_splat_relevance",
     "bilinear_splat_relevance_vectorized",
     "compute_bilinear_weights",

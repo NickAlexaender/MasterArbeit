@@ -44,12 +44,6 @@ def load_top_features(top_features_csv: str, module: str) -> List[TopFeature]:
 
 
 def map_layer_to_visual(module: str, layer_idx: int) -> int:
-    """Map a data layer index to a visual layer number depending on module.
-
-    Rules:
-    - encoder: visual_layer = layer_idx + 2 (visual layers 1..7 expected)
-    - decoder: visual_layer = layer_idx + 2 (visual layers 1..4 for decoder)
-    """
     module = module.lower()
     if module == "encoder":
         return layer_idx + 2
@@ -68,10 +62,6 @@ def get_layer_feature_csv(root_dir: str, encoder_layer_idx: int, feature_idx: in
 def load_top_k_edges_for_node(
     csv_path: str, k: int
 ) -> List[Tuple[int, float]]:
-    """Return top-k (prev_feature_idx, relevance) by absolute relevance from a node CSV.
-
-    If file missing or empty, return [].
-    """
     if not os.path.exists(csv_path):
         return []
     try:
@@ -117,12 +107,6 @@ def build_edges(
 
 
 def compute_layout(num_layers: int = 7, features_per_layer: int = 256, width: int = 256) -> Dict[Tuple[int, int], Tuple[float, float]]:
-    """Compute (x,y) for each (visual_layer, feature_idx).
-
-    - Layers are numbered 1..num_layers vertically from bottom (1) to top (num_layers).
-    - x is feature index normalized to [0, 1]. y is normalized to [0, 1].
-    - width is used only to scale marker sizes aesthetically later.
-    """
     coords: Dict[Tuple[int, int], Tuple[float, float]] = {}
     for layer in range(1, num_layers + 1):
         y = (layer - 1) / (num_layers - 1) if num_layers > 1 else 0.5
@@ -273,11 +257,6 @@ def main(
     fig_width: float = 20.0,
     fig_height: float = 12.0,
 ):
-    """Run the visualisation pipeline.
-
-    Parameters mirror the previous CLI flags so this function can be called externally.
-    Returns a tuple of (png_path, svg_path).
-    """
     # Load data for selected module
     module = module.lower()
     top_nodes = load_top_features(top_features, module)
