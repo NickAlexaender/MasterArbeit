@@ -1,19 +1,9 @@
-"""Masken-Utilities (OpenCV-basiert).
-
-Funktionen:
-- _prepare_mask_binary: Farbbild (BGR/RGB) -> binäre Maske per Rot-Heuristik
-- _load_mask_for_input: lädt Maske für image_id und resampled auf Input-Größe
-- _save_overlay_comparison: speichert Vergleichsbild (TP blau, FN rot, FP grün)
-"""
 
 from __future__ import annotations
-
 import logging
 import os
 from typing import Optional, Tuple
-
 import numpy as np
-
 try:
     import cv2
     try:
@@ -36,13 +26,9 @@ def _require_cv2() -> None:
             "(oder 'opencv-python-headless' für Headless-Umgebungen) ausführen."
         )
 
+# Wandelt farbige Maske in binäre um
 
 def _prepare_mask_binary(mask_bgr: np.ndarray) -> np.ndarray:
-    """Wandelt farbige Maske in binäre (bool) um.
-
-    Heuristik für 'rot': R hoch, G/B niedrig. Fallback: alle != schwarz. Erwartet BGR oder RGB.
-    Rückgabe: bool-Array [H, W].
-    """
     if mask_bgr.ndim == 2:
         return (mask_bgr > 0)
 
@@ -56,16 +42,13 @@ def _prepare_mask_binary(mask_bgr: np.ndarray) -> np.ndarray:
         return non_black
     return red_dominant
 
+# Lädt die Maske für ein gegebenes Bild und liefert sie als bool-Array
 
 def _load_mask_for_input(
     input_size: Tuple[int, int],
     image_id: str,
     mask_dir: Optional[str] = None,
 ) -> np.ndarray:
-    """Lädt die Maske für das gegebene Bild und liefert sie als bool-Array in Input-Größe (H_in, W_in).
-
-    Sucht nach <mask_dir>/<image_id>.jpg bzw. .png und skaliert mit NEAREST.
-    """
     _require_cv2()
     if mask_dir is None:
         from .io_utils import get_mask_dir
@@ -85,6 +68,11 @@ def _load_mask_for_input(
     mask_input = cv2.resize(mask_bin, (Win, Hin), interpolation=cv2.INTER_NEAREST).astype(bool)
     return mask_input
 
+# Speichert Vergleichsbild mit Overlay der Maske und Heatmap
+# Rot -> Maske, 
+# Blau -> Überschneidung
+# Grün -> Prediction
+# Schwarz -> Rest
 
 def _save_overlay_comparison(
     dest_path: str,
@@ -92,12 +80,6 @@ def _save_overlay_comparison(
     heatmap: np.ndarray,
     threshold: float,
 ) -> None:
-    """Erstellt und speichert Vergleichsbild mit klassischer Farb-Logik:
-    - Rot   (BGR=0,0,255): Ground Truth nur (FN)
-    - Blau  (BGR=255,0,0): Überschneidung von GT und Prediction (TP)
-    - Grün  (BGR=0,255,0): Prediction nur (FP)
-    - Schwarz (0,0,0): Weder GT noch Prediction (TN)
-    """
     _require_cv2()
     mask = mask_input.astype(bool)
     bin_hm = (heatmap.astype(np.float32) >= float(threshold))

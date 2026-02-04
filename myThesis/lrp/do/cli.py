@@ -1,6 +1,3 @@
-"""
-Command line interface parser for calc_lrp.
-"""
 from __future__ import annotations
 
 import argparse

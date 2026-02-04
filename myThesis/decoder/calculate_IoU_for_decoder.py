@@ -1,11 +1,4 @@
 from __future__ import annotations
-
-"""CLI entrypoint for the decoder pipeline.
-
-This module only configures logging and parses CLI arguments, then delegates to
-decoder.pipeline.main_network_dissection_per_query.
-"""
-
 import argparse
 import logging
 from typing import Optional
@@ -16,15 +9,16 @@ from .io_utils import decoder_out_dir as _decoder_out_dir
 from .io_utils import mask_dir as _mask_dir
 from .io_utils import resolve_export_root as _resolve_export_root
 
+# Wir öffnen die CSV
 
 def _ensure_cv2_available() -> None:
     try:
         import cv2  # type: ignore  # noqa: F401
     except Exception as e:
         raise RuntimeError(
-            "OpenCV (cv2) is required. Install with 'pip install opencv-python'."
         ) from e
 
+# Und übertragen die Daten
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Network Dissection (MaskDINO decoder)")
@@ -51,8 +45,6 @@ def main() -> None:
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
-
-    # Early check for cv2 to provide actionable error messages
     _ensure_cv2_available()
 
     _pipeline_main(
@@ -66,20 +58,14 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-
-# Backward-compatible API for in-repo callers importing this module
+# Wir bauen die Funktionen so auf, dass wir sie von außerhalb aufrufen können
+# 
 def main_network_dissection_per_query(
     percentile: float = DEFAULT_PERCENTILE,
     mask_dir: Optional[str] = None,
     decoder_out_dir: Optional[str] = None,
     export_root: Optional[str] = None,
 ) -> None:
-    """Compatibility wrapper delegating to pipeline.main_network_dissection_per_query.
-
-    Kept to support existing imports like:
-    from myThesis.decoder import calculate_IoU_for_decoder
-    calculate_IoU_for_decoder.main_network_dissection_per_query(...)
-    """
 
     _pipeline_main(
         percentile=percentile,

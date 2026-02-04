@@ -1,24 +1,12 @@
-"""Gemeinsame Datenmodelle für die Encoder-Pipeline."""
-
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
-
 import numpy as np
 
+# Datenstruktur für IoU/Heatmap-Berechnungen pro Feature
 
 @dataclass
 class IoUInput:
-    """Eingabe-Paket für IoU/Heatmap-Berechnungen.
-
-    - layer_idx: Layer-Index
-    - image_id: Bild-ID (z. B. "image 1")
-    - feature_idx: Feature-Index (1-basiert)
-    - tokens: 1D-Array (N,) mit Aktivierungswerten
-    - shapes: shapes.json-Inhalt (u. a. spatial_shapes, level_start_index, input_size)
-    - mask_input: boolsche Maske in Input-Größe (H_in, W_in)
-    """
     layer_idx: int
     image_id: str
     feature_idx: int
@@ -26,10 +14,10 @@ class IoUInput:
     shapes: Dict
     mask_input: np.ndarray
 
+# Ergebnis einer kombinierten Heatmap über alle Levels
 
 @dataclass
 class IoUCombinedResult:
-    """Ergebnis einer kombinierten Heatmap über alle Levels (auf Inputgröße)."""
     layer_idx: int
     image_id: str  # String-ID (z.B. "image 1")
     feature_idx: int

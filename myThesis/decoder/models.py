@@ -5,16 +5,10 @@ from typing import Tuple, Optional
 
 import numpy as np
 
+# Für die IoU-Berechnung brauchen wir die Datenstruktur pro Layer/Image/Query
 
 @dataclass(frozen=True)
 class DecoderIoUInput:
-    """Payload for IoU computation per (layer, image, query).
-
-    Fields mirror the original monolithic implementation's expectations.
-    - query_features: shape [C]
-    - pixel_embedding: shape [C, H, W]
-    - mask_input: boolean mask with shape equal to input_size
-    """
 
     layer_idx: int
     image_id: str
@@ -24,14 +18,10 @@ class DecoderIoUInput:
     input_size: Tuple[int, int]
     mask_input: np.ndarray  # dtype bool
 
+# Pro Query-Ergebnis speichern wir die Resultate
 
 @dataclass(frozen=True)
 class IoUCombinedResult:
-    """Optional combined result holder for visualization or debugging.
-
-    Not required by the core pipeline but handy for testing or future
-    extensions without adding logic to models.py.
-    """
 
     layer_idx: int
     image_id: str

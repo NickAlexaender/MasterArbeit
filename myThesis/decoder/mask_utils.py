@@ -21,13 +21,9 @@ def _import_cv2():
             "OpenCV (cv2) is required for mask operations. Install with 'pip install opencv-python'."
         ) from e
 
+# Umwandeln von Farbmasken in Binäre
 
 def prepare_mask_binary(mask_bgr: np.ndarray) -> np.ndarray:
-    """Convert a color mask to a boolean mask.
-
-    Heuristic for red masks: high R, low G/B. Fallback: any non-black pixel.
-    Returns boolean array [H, W].
-    """
 
     if mask_bgr.ndim == 2:
         return (mask_bgr > 0)
@@ -42,15 +38,9 @@ def prepare_mask_binary(mask_bgr: np.ndarray) -> np.ndarray:
         return non_black
     return red_dominant
 
+# Aus den Metadaten werden die Input-Größen berechnet
 
 def get_input_size_from_embedding(metadata: Dict[str, Any]) -> Tuple[int, int]:
-    """Determine input size from embedding metadata.
-
-    Priority:
-    1) input_h/input_w
-    2) embed_h/w * stride
-    3) embed_h/w * 32 (default heuristic)
-    """
 
     if "input_h" in metadata and "input_w" in metadata:
         return int(metadata["input_h"]), int(metadata["input_w"])
@@ -64,14 +54,13 @@ def get_input_size_from_embedding(metadata: Dict[str, Any]) -> Tuple[int, int]:
 
     return embed_h * 32, embed_w * 32
 
+# Nun können wir die Input-Größen validieren
 
 def validate_input_size(
     input_size: Tuple[int, int],
     metadata: Dict[str, Any],
     max_size: int = MAX_INPUT_SIZE,
 ) -> Tuple[int, int]:
-    """Ensure size is at least embedding size and at most max_size."""
-
     input_h, input_w = int(input_size[0]), int(input_size[1])
     embed_h = int(metadata.get("embed_h", metadata.get("height", 25)))
     embed_w = int(metadata.get("embed_w", metadata.get("width", 25)))
@@ -96,17 +85,13 @@ def validate_input_size(
 
     return input_h, input_w
 
+# Jetzt laden wir die MAsken für ein Bild und skalieren sie auf die Input-Größe
 
 def load_mask_for_image(
     image_id: str,
     input_size: Tuple[int, int],
     mask_dir: Optional[str] = None,
 ) -> np.ndarray:
-    """Load the mask for an image and resize to input size.
-
-    Searches for files named like "image_1" or "image 1" with common extensions.
-    Returns a boolean array of shape (H, W).
-    """
 
     cv2 = _import_cv2()
     mdir = mask_dir or _default_mask_dir()
@@ -137,16 +122,13 @@ def load_mask_for_image(
     mask_input = cv2.resize(mask_bin, (Win, Hin), interpolation=cv2.INTER_NEAREST).astype(bool)
     return mask_input
 
+# Wir speichern die Overlay-Visualisierung ab.
+# Rot -> Maske
+# Blau -> Übereinstimmung
+# Grün -> Vorhersage
+# Schwarz -> Rest
 
 def save_overlay(path: str, mask: np.ndarray, bin_map: np.ndarray) -> None:
-    """Save an RGB overlay visualization using BGR encoding for cv2.imwrite.
-
-    Colors:
-    - Red: mask only (FN)
-    - Blue: intersection (TP)
-    - Green: bin_map only (FP)
-    - Black: elsewhere (TN)
-    """
 
     cv2 = _import_cv2()
 

@@ -516,7 +516,7 @@ def process_dataset(dataset_name, base_path):
     base_output_dir = base_path
     
     # Nur diese Farben werden als Masken ausgegeben
-    output_colors = ['grau', 'orange', 'schwarz']
+    output_colors = ['grau', 'orange', 'schwarz', 'blau']
     
     # Erstelle nur die benötigten Ausgabeordner
     for color_folder in output_colors:
@@ -563,7 +563,8 @@ def process_dataset(dataset_name, base_path):
             color_mapping = {
                 'orange': 'orange',
                 'schwarz': 'schwarz',
-                'grau': 'grau'
+                'grau': 'grau',
+                'blau': 'blau'
             }
             
             for color, temp_mask_path in extracted_masks.items():

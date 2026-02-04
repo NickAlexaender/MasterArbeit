@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-"""Central configuration and constants for the decoder pipeline.
+# Paar basic Konfigurationen
 
-Note: Do not configure logging here. The CLI (calculate_IoU_for_decoder.py)
-initializes logging. Modules only create module-level loggers.
-"""
-
-# Default percentile used for per-query thresholding
+# Standardwert in Network Dissection-Paper
 DEFAULT_PERCENTILE: float = 99.5
 
-# Safety cap for input size upscaling (HxW)
+# Bilder dürfen nicht zu groß sein
 MAX_INPUT_SIZE: int = 2048
 
-# Subdirectories and filenames
+# Auch bei den files geben wir Standardwerte an
 EXPORT_SUBDIR: str = "iou_results"
 MASK_DEFAULT_SUBDIR: str = "image/rot"
 DECODER_DEFAULT_SUBDIR: str = "output/decoder"

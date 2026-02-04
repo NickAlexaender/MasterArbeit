@@ -1,9 +1,3 @@
-"""
-Compatibility/monkey patches for Pillow and NumPy.
-Must be imported before any other heavy imports.
-Note: Do not import torch or any internal modules here.
-"""
-
 # PIL/Pillow compatibility fixes
 try:
     import PIL.Image  # type: ignore

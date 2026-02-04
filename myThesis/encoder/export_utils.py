@@ -1,16 +1,8 @@
-"""Export-Helfer (CSV/Dirs) ohne Bildverarbeitung.
-
-Erweitert um einen effizienten CSV-Appender, um zeilenweise zu schreiben,
-ohne große Listen im Speicher zu halten.
-"""
-
 from __future__ import annotations
-
 import csv
 import logging
 import os
 from typing import Dict, List, Optional
-
 from .io_utils import _ensure_dir
 
 logger = logging.getLogger(__name__)
@@ -25,6 +17,7 @@ def resolve_export_root(encoder_out_dir: str | None) -> str:
     _ensure_dir(export_root)
     return export_root
 
+# Wir erstellen eine CSV Datei mit den Ergebnissen 
 
 def _write_network_dissection_csv(path: str, rows: List[Dict[str, object]]) -> None:
     """Schreibt Network Dissection mIoU-Ergebnisse in CSV."""
@@ -47,12 +40,9 @@ def _write_network_dissection_csv(path: str, rows: List[Dict[str, object]]) -> N
         writer.writeheader()
         writer.writerows(rows)
 
+# Wir brauchen etwas, was DAten an eine CSV anhängt
 
 class CsvAppender:
-    """Einfacher CSV-Appender, der Header bei Bedarf schreibt.
-
-    Verwendet die gleiche Feldreihenfolge wie _write_network_dissection_csv.
-    """
 
     FIELDNAMES = [
         "layer_idx",

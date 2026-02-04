@@ -1,6 +1,3 @@
-"""
-I/O helpers for images and results.
-"""
 from __future__ import annotations
 
 import glob

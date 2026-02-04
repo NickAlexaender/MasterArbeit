@@ -1,7 +1,4 @@
-"""Iteratoren für CSV -> IoUInput-Generierung."""
-
 from __future__ import annotations
-
 import csv
 import logging
 import os
@@ -22,19 +19,15 @@ from .models import IoUInput
 logger = logging.getLogger(__name__)
 
 
-# Neues Format: "image 1, Feature1" statt "Bild1, Feature1"
+# Neue Regex für den Namen
 _NAME_RE = re.compile(r"^(.+?),\s*Feature(\d+)$")
 
+# Iterieren über die Zeilen einer feature.csv
 
 def _iter_csv_rows(csv_path: str) -> Iterable[Tuple[str, int, np.ndarray]]:
-    """Iteriert Zeilen einer feature.csv und liefert (image_id, feature_idx, tokens).
-
-    tokens ist ein 1D np.ndarray[N] float32.
-    image_id ist der String-Identifikator (z.B. "image 1").
-    """
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.reader(f)
-        _ = next(reader, None)  # Header
+        _ = next(reader, None)
         for row in reader:
             if not row:
                 continue
@@ -54,16 +47,12 @@ def _iter_csv_rows(csv_path: str) -> Iterable[Tuple[str, int, np.ndarray]]:
             yield image_id, feat_idx, tokens
 
 
+# Hier leifern wir pro Zeile ein IoUInput-Paket
+
 def iter_iou_inputs(
     encoder_out_dir: Optional[str] = None,
     mask_dir: Optional[str] = None,
 ) -> Generator[IoUInput, None, None]:
-    """Haupt-Iterator: liefert pro CSV-Zeile ein IoUInput-Paket.
-
-    - Erkennt Layer-Index aus Ordnernamen.
-    - Mappt image_id auf passende shapes.json (direkter Match bevorzugt).
-    - Bereitet Maske für input-Size vor (gecacht pro input_size UND image_id).
-    """
     layer_csvs = _find_layer_csvs(encoder_out_dir)
     all_shapes = _load_all_shapes(encoder_out_dir)
 

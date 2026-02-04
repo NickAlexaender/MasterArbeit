@@ -15,26 +15,20 @@ from .iterators import iter_decoder_iou_inputs
 
 logger = logging.getLogger(__name__)
 
+# We use a activation percentile here to compute the thresholds.
+# We accept values between 0-100 and 0-1 
 
 def compute_per_query_thresholds(
     percentile: float = 99.5,
     decoder_out_dir: Optional[str] = None,
     mask_dir: Optional[str] = None,
 ) -> Dict[Tuple[int, int], float]:
-    """Compute per-query thresholds across all images using an activation percentile.
-
-    Returns mapping (layer_idx, query_idx) -> threshold.
-    """
-
-    # Accept both [0, 100] and fractional [0, 1] inputs for percentile.
-    # Users sometimes pass 0.90 to mean "top 10%"; numpy expects 90.0.
     pct = float(percentile)
     if 0.0 < pct <= 1.0:
         pct *= 100.0
         logger.debug(
             "Percentile provided as fraction; normalized to %.3f (x100)", pct
         )
-    # Clamp to valid numpy percentile range
     pct = max(0.0, min(100.0, pct))
 
     logger.info("Computing per-query thresholds (percentile=%.3f)", pct)
@@ -64,16 +58,13 @@ def compute_per_query_thresholds(
     return thresholds
 
 
+# We want to calculate the mean IoU of all images for each query
+
 def compute_mean_iou_per_query(
     query_thresholds: Dict[Tuple[int, int], float],
     decoder_out_dir: Optional[str] = None,
     mask_dir: Optional[str] = None,
 ) -> Dict[int, List[Dict[str, object]]]:
-    """Compute average IoU over all images for each query.
-
-    Returns: dict[layer_idx] -> list of {"query_idx", "mean_iou", "num_images"},
-    sorted by mean_iou desc per layer.
-    """
 
     logger.info("Computing mean IoU per query…")
 

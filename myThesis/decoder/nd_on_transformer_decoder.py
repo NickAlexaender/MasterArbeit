@@ -1,22 +1,5 @@
-"""
-Vorbereitung für Network Dissection auf dem Transformer Decoder in MaskDINO.
 
-Dieses Modul übernimmt ausschließlich:
-- Aufbau der MaskDINO-Konfiguration und Laden der finetuned Gewichte
-- Bereitstellung einer Bildliste (Beispieleingaben)
-- Auffinden des Transformer-Decoders im Modell und Ausgabe einer Kurz-Zusammenfassung
-- Aufruf von (noch zu definierenden) Hook-/Analyse-Funktionen für den Decoder
-
-Wichtig: Die eigentliche Network-Dissection-Logik ist hier NICHT implementiert.
-Die folgenden Funktionen werden bewusst referenziert, aber nicht definiert –
-damit du sie separat implementieren kannst:
-
-- attach_decoder_hooks(decoder) -> hook_handles
-- detach_decoder_hooks(hook_handles) -> None
-- run_network_dissection_on_decoder(model, decoder, image_list, classes, weights_path) -> Any
-
-Siehe Kommentare weiter unten für eine knappe „Contract“-Beschreibung.
-"""
+# Vorbereitung des Transformer Decoder in MaskDINO auf Network Dissection.
 
 # --- Kompatibilitätsfixe (Pillow/NumPy) ---
 try:
@@ -296,28 +279,6 @@ def gather_images(image_dir: str = "/Users/nicklehmacher/Alles/MasterArbeit/myTh
 	return sorted(candidates, key=lambda x: x[1])
 
 
-# --- Vertragsbeschreibung (für zu implementierende Funktionen) ---
-# Erwartete Signaturen (NICHT hier definieren):
-#
-# def attach_decoder_hooks(decoder: torch.nn.Module):
-#     """Registriert Forward-/Backward-Hooks am Decoder und gibt Handles zurück."""
-#     ...
-#
-# def detach_decoder_hooks(hook_handles):
-#     """Hebt alle registrierten Hooks wieder auf."""
-#     ...
-#
-# def run_network_dissection_on_decoder(
-#     model: torch.nn.Module,
-#     decoder: torch.nn.Module,
-#     image_list: List[str],
-#     classes: List[str],
-#     weights_path: str,
-# ):
-#     """Führt die ND-Analyse für den Decoder durch (E2E, inkl. Forward-Pässe)."""
-#     ...
-
-
 def _require(name: str) -> None:
 	if name not in globals():
 		raise NotImplementedError(
@@ -350,38 +311,11 @@ def main(
 	print("🔎 Suche Transformer-Decoder…")
 	decoder = find_transformer_decoder(model_nn)
 	print_decoder_summary(decoder)
-
-	# Sicherstellen, dass die Analyse-Hooks implementiert werden (dynamisch auflösen)
-	#for fn in ("attach_decoder_hooks", "detach_decoder_hooks", "run_network_dissection_on_decoder"):
-	#	try:
-	#		_require(fn)
-	#	except NotImplementedError as e:
-	#		# Frühes, klares Feedback für die nächste Implementationsphase
-	#		print(f"❗ {e}")
-	#		print("Beende, da die erforderlichen ND-Funktionen noch fehlen.")
-	#		return
-
-	#fn_attach = globals().get("attach_decoder_hooks")
-	# fn_detach = globals().get("detach_decoder_hooks")
  
 	print(f"📁 Ausgabeziel: {output_dir}")
 	accept_weights_model_images(weights_path, model_nn, image_list, output_dir=output_dir)
 
 	print("🪝 Registriere Decoder-Hooks…")
-	#hook_handles = fn_attach(decoder)  # type: ignore[operator]
-	#try:
-	#	print("🧪 Starte Network Dissection auf dem Decoder…")
-	#	fn_run(  # type: ignore[misc]
-	#		model=model,
-	#		decoder=decoder,
-	#		image_list=image_list,
-	#		classes=classes,
-	#		weights_path=weights_path,
-	#	)
-	#	print("✅ ND-Lauf abgeschlossen.")
-	#finally:
-	#	print("🧹 Löse Decoder-Hooks…")
-	#	fn_detach(hook_handles)  # type: ignore[misc]
 
 
 if __name__ == "__main__":

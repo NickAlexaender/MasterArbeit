@@ -1,27 +1,13 @@
-"""
-Lineare Algebra für LRP-Attention-Propagation.
-
-Diese Datei enthält die "mechanische" Relevanz-Verteilung für die
-linearen Komponenten des Attention-Mechanismus:
-    - Value-Pfad: O = A · V
-    - Query/Key-Pfad: S = Q · K^T / √d_k
-    - Projektions-Layer: y = x @ W^T
-
-Die Implementierung nutzt torch.einsum für effiziente Tensoroperationen.
-"""
 from __future__ import annotations
-
 from typing import Optional, Tuple
 import torch
 from torch import Tensor
-
 from myThesis.lrp.do.tensor_ops import safe_divide
 
 
-# =============================================================================
 # LRP für Value-Pfad: R_O -> R_V
-# =============================================================================
-
+# Hier wollen wir die Relevanz von der Attention-Ausgabe zurück zu den Values propagieren.
+# O = A · V -> proportional zum Beitrag jedes Value-Vektors verteilt
 
 def lrp_attention_value_path(
     R_out: Tensor,
@@ -29,25 +15,6 @@ def lrp_attention_value_path(
     V: Tensor,
     eps: float = 1e-6,
 ) -> Tensor:
-    """Propagiert Relevanz von Attention-Output zurück zu Values.
-    
-    Die Attention-Ausgabe ist O = A · V (matmul über Source-Dimension).
-    Relevanz wird proportional zum Beitrag jedes Value-Vektors verteilt.
-    
-    Args:
-        R_out: Relevanz der Attention-Ausgabe (B, H, T, Dh)
-        attn_weights: Attention-Gewichte A (B, H, T, S)
-        V: Value-Projektionen (B, H, S, Dh)
-        eps: Stabilisierungsterm
-        
-    Returns:
-        R_V: Relevanz der Values (B, H, S, Dh)
-        
-    Mathematik:
-        O_t = Σ_s A_ts · V_s
-        R_V[s] = Σ_t (A_ts · V_s) / (Σ_s' A_ts' · V_s') · R_O[t]
-               = Σ_t A_ts · V_s / O_t · R_O[t]
-    """
     B, H, T, S = attn_weights.shape
     _, _, _, Dh = V.shape
     
@@ -66,6 +33,7 @@ def lrp_attention_value_path(
     
     return R_V
 
+# Diese Variante normalisiert die Relevanz, sodass die Summe erhalten bleibt.
 
 def lrp_attention_value_path_conservative(
     R_out: Tensor,
@@ -73,19 +41,6 @@ def lrp_attention_value_path_conservative(
     V: Tensor,
     eps: float = 1e-6,
 ) -> Tensor:
-    """Konservative LRP für Value-Pfad (erhält Gesamtrelevanz exakt).
-    
-    Diese Variante normalisiert die Relevanz, sodass die Summe erhalten bleibt.
-    
-    Args:
-        R_out: Relevanz der Attention-Ausgabe (B, H, T, Dh)
-        attn_weights: Attention-Gewichte A (B, H, T, S)
-        V: Value-Projektionen (B, H, S, Dh)
-        eps: Stabilisierungsterm
-        
-    Returns:
-        R_V: Relevanz der Values (B, H, S, Dh), konservativ normalisiert
-    """
     R_V = lrp_attention_value_path(R_out, attn_weights, V, eps)
     
     # Konservative Normalisierung
@@ -96,10 +51,9 @@ def lrp_attention_value_path_conservative(
     return R_V * scale
 
 
-# =============================================================================
-# LRP für Attention-Gewichte: R_O -> R_A
-# =============================================================================
-
+# Wir können die Attention-Gewichte aus der Output-Relevanz berechnen
+# O_td = Σ_s A_ts · V_sd
+# R_A[t,s] = Σ_d (A_ts · V_sd) / O_td · R_O[t,d]
 
 def lrp_attention_to_weights(
     R_out: Tensor,
@@ -107,24 +61,6 @@ def lrp_attention_to_weights(
     V: Tensor,
     eps: float = 1e-6,
 ) -> Tensor:
-    """Berechnet Relevanz der Attention-Gewichte aus Output-Relevanz.
-    
-    Die Attention-Ausgabe ist O = A · V.
-    Diese Funktion berechnet, wie relevant jedes Attention-Gewicht A_ts war.
-    
-    Args:
-        R_out: Relevanz der Attention-Ausgabe (B, H, T, Dh)
-        attn_weights: Attention-Gewichte A (B, H, T, S)
-        V: Value-Projektionen (B, H, S, Dh)
-        eps: Stabilisierungsterm
-        
-    Returns:
-        R_A: Relevanz der Attention-Gewichte (B, H, T, S)
-        
-    Mathematik:
-        O_td = Σ_s A_ts · V_sd
-        R_A[t,s] = Σ_d (A_ts · V_sd) / O_td · R_O[t,d]
-    """
     B, H, T, S = attn_weights.shape
     _, _, _, Dh = V.shape
     
@@ -143,10 +79,8 @@ def lrp_attention_to_weights(
     return R_A
 
 
-# =============================================================================
-# LRP für Query/Key: R_S -> R_Q, R_K
-# =============================================================================
-
+# Propagiert Relevanz von Scores S zu Queries Q und Keys K
+# S = Q · K^T / √d_k
 
 def lrp_attention_qk_path(
     R_S: Tensor,
@@ -155,28 +89,6 @@ def lrp_attention_qk_path(
     scale: Optional[float] = None,
     eps: float = 1e-6,
 ) -> Tuple[Tensor, Tensor]:
-    """Propagiert Relevanz von Scores S zu Queries Q und Keys K.
-    
-    Die Attention-Scores sind S = Q · K^T / √d_k.
-    Diese Funktion verteilt die Relevanz auf Q und K.
-    
-    Args:
-        R_S: Relevanz der Attention-Scores (B, H, T, S)
-        Q: Query-Projektionen (B, H, T, Dh)
-        K: Key-Projektionen (B, H, S, Dh)
-        scale: Skalierungsfaktor (Standard: 1/√Dh)
-        eps: Stabilisierungsterm
-        
-    Returns:
-        (R_Q, R_K): Relevanz für Queries (B,H,T,Dh) und Keys (B,H,S,Dh)
-        
-    Mathematik:
-        S_ts = (Q_t · K_s) / √d = Σ_d Q_td · K_sd / √d
-        
-        Für die ε-Regel:
-        R_Q[t,d] = Σ_s (Q_td · K_sd / √d) / S_ts · R_S[t,s]
-        R_K[s,d] = Σ_t (Q_td · K_sd / √d) / S_ts · R_S[t,s]
-    """
     B, H, T, Dh = Q.shape
     _, _, S_dim, _ = K.shape
     
@@ -199,6 +111,8 @@ def lrp_attention_qk_path(
     
     return R_Q, R_K
 
+# Symmetrische Q/K-Relevanz-Verteilung (50/50 Split)
+#  Diese Variante verteilt die Relevanz gleichmäßig zwischen Q und K, was für Self-Attention oft sinnvoller ist
 
 def lrp_attention_qk_path_symmetric(
     R_S: Tensor,
@@ -207,22 +121,6 @@ def lrp_attention_qk_path_symmetric(
     scale: Optional[float] = None,
     eps: float = 1e-6,
 ) -> Tuple[Tensor, Tensor]:
-    """Symmetrische Q/K-Relevanz-Verteilung (50/50 Split).
-    
-    Diese Variante verteilt die Relevanz gleichmäßig zwischen Q und K,
-    was für Self-Attention (wo Q und K aus derselben Quelle stammen) 
-    oft sinnvoller ist.
-    
-    Args:
-        R_S: Relevanz der Attention-Scores (B, H, T, S)
-        Q: Query-Projektionen (B, H, T, Dh)
-        K: Key-Projektionen (B, H, S, Dh)
-        scale: Skalierungsfaktor
-        eps: Stabilisierungsterm
-        
-    Returns:
-        (R_Q, R_K): Symmetrisch verteilte Relevanz
-    """
     R_Q, R_K = lrp_attention_qk_path(R_S, Q, K, scale, eps)
     
     # Berechne Gesamt-Relevanz
@@ -238,11 +136,7 @@ def lrp_attention_qk_path_symmetric(
     
     return R_Q, R_K
 
-
-# =============================================================================
-# LRP für Projektions-Layer (W_Q, W_K, W_V, W_O)
-# =============================================================================
-
+# Propagiert Relevanz durch eine lineare Projektion: y = x @ W^T
 
 def lrp_projection_layer(
     R_proj: Tensor,
@@ -250,19 +144,6 @@ def lrp_projection_layer(
     W: Tensor,
     eps: float = 1e-6,
 ) -> Tensor:
-    """LRP für lineare Projektionsschicht (Q/K/V/O-Projektion).
-    
-    Propagiert Relevanz durch eine lineare Projektion: y = x @ W^T
-    
-    Args:
-        R_proj: Relevanz der Projektion (B, ..., out_features)
-        x_in: Eingabe vor Projektion (B, ..., in_features)
-        W: Gewichtsmatrix (out_features, in_features)
-        eps: Stabilisierungsterm
-        
-    Returns:
-        R_in: Relevanz der Eingabe (B, ..., in_features)
-    """
     # z = x @ W^T
     z = torch.einsum("...i,oi->...o", x_in, W)
     
@@ -272,6 +153,7 @@ def lrp_projection_layer(
     
     return x_in * c
 
+# Propagiert Relevanz durch die Output-Projektion, die alle Heads kombiniert
 
 def lrp_multihead_output_projection(
     R_out: Tensor,
@@ -280,21 +162,6 @@ def lrp_multihead_output_projection(
     num_heads: int,
     eps: float = 1e-6,
 ) -> Tensor:
-    """LRP für Multi-Head Output-Projektion.
-    
-    Propagiert Relevanz durch die Output-Projektion, die alle Heads kombiniert:
-    output = concat(head_1, ..., head_H) @ W_O^T
-    
-    Args:
-        R_out: Relevanz der finalen Ausgabe (B, T, C)
-        context: Konkatenierte Head-Ausgaben (B, T, H*Dh)
-        W_O: Output-Projektionsgewichte (C, H*Dh) oder (H, Dh, C)
-        num_heads: Anzahl der Attention-Heads
-        eps: Stabilisierungsterm
-        
-    Returns:
-        R_context: Relevanz der Head-Ausgaben (B, T, H*Dh)
-    """
     # Falls W_O in Head-Format (H, Dh, C), reshape zu (C, H*Dh)
     if W_O.dim() == 3:
         H, Dh, C = W_O.shape
@@ -303,27 +170,12 @@ def lrp_multihead_output_projection(
     return lrp_projection_layer(R_out, context, W_O.T, eps)
 
 
-# =============================================================================
-# Hilfsfunktion für Encoder-Token-Relevanz
-# =============================================================================
-
+# Aggregieren der Encoder-Relevanz zu Token-Level Scores
 
 def compute_encoder_token_relevance(
     R_encoder: Tensor,
     spatial_shape: Optional[Tuple[int, int]] = None,
 ) -> Tensor:
-    """Aggregiert Encoder-Relevanz zu Token-Level Scores.
-    
-    Kombiniert die Relevanz über alle Heads und Dimensionen, um einen
-    einzelnen Relevanz-Score pro Encoder-Token zu erhalten.
-    
-    Args:
-        R_encoder: Encoder-Relevanz (B, H, S, Dh) oder (B, S, C)
-        spatial_shape: Optional (H, W) für räumliche Reorganisation
-        
-    Returns:
-        Token-Relevanz (B, S) oder (B, H, W) falls spatial_shape gegeben
-    """
     if R_encoder.dim() == 4:
         # (B, H, S, Dh) -> (B, S)
         R_tokens = R_encoder.sum(dim=(1, 3))  # Summiere über Heads und Dh

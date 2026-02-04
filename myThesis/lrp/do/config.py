@@ -1,21 +1,16 @@
-"""
-Konstanten und Defaults für die lokale LRP (L-1 -> L) Analyse.
-Die Werte sind konservativ und deterministisch, ohne Änderung der CLI-Signatur.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Feste, rückwärtskompatible Defaults (kein Eingriff in main/CLI nötig)
-TARGET_TOKEN_IDX: int = 0              # Ziel-Token t* (Decoder-Query bzw. Encoder-Token)
-USE_SUBLAYER: str = "self_attn"        # {"self_attn", "cross_attn", "ffn"}
-MEASUREMENT_POINT: str = "post_res"    # {"pre_res", "post_res"}
-RESIDUAL_SPLIT: str = "zsign"          # {"energy", "dotpos", "zsign"}
-LN_RULE: str = "conservative"           # {"taylor", "zsign", "conservative"} - zsign verliert Feature-Unterscheidung!
-ATTN_QK_SHARE: float = 0.0             # ρ-Anteil für Q/K (0.0 ⇒ nur Value)
+TARGET_TOKEN_IDX: int = 0
+USE_SUBLAYER: str = "self_attn"
+MEASUREMENT_POINT: str = "post_res"
+RESIDUAL_SPLIT: str = "zsign"
+LN_RULE: str = "conservative"
+ATTN_QK_SHARE: float = 0.0
 DETERMINISTIC: bool = True
 SEED: int = 1234
-SIGN_PRESERVING: bool = True           # Vorzeichen über alle Regeln bewahren
+SIGN_PRESERVING: bool = True
 
 __all__ = [
     "TARGET_TOKEN_IDX",

@@ -1,18 +1,4 @@
-"""Pipeline-Implementierung für Network Dissection Export (speichersparend, streaming-basiert).
-
-Neues Design (M1-optimiert, bounded memory):
-- Mehrpass-Verarbeitung ohne Speicherung kompletter Heatmap-Sammlungen
-- Streaming-Perzentile je Feature (Reservoir oder Histogramm)
-- CSV-Schreiben pro Layer mit minimalem Speicherbedarf
-- Overlays werden in einem separaten Pass nur für Gewinner-Features erzeugt
-
-Beinhaltet:
-- resolve_percentile(...)
-- main_export_network_dissection(...)
-"""
-
 from __future__ import annotations
-
 import gc
 import json
 import logging
@@ -20,10 +6,9 @@ import os
 import time
 from typing import Dict, List, Optional, Tuple
 
-# Threading-Limits früh setzen, bevor große Libs initialisiert werden
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "4")  # Apple Accelerate
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "4")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 import numpy as np
@@ -38,16 +23,9 @@ from .mask_utils import _save_overlay_comparison
 
 logger = logging.getLogger(__name__)
 
+# Ermittelt das Perzentil (0–100) für den Threshold. Kann es auch als 0-1 interpretieren.
 
 def resolve_percentile(percentile: Optional[float], top_percent_active: Optional[float]) -> float:
-    """Ermittelt das Perzentil (0–100) für den Threshold.
-
-    Regeln:
-    - Wenn top_percent_active gesetzt ist (in %), nutze Perzentil = 100 - top_percent_active.
-    - Wenn percentile None ist, nutze NETWORK_DISSECTION_PERCENTILE.
-    - Wenn 0 < percentile <= 1 ist, interpretiere es als Anteil (0..1) -> Prozentil = percentile * 100.
-    - Ansonsten clamp (0–100).
-    """
     if top_percent_active is not None:
         try:
             val = float(top_percent_active)
@@ -75,6 +53,7 @@ def resolve_percentile(percentile: Optional[float], top_percent_active: Optional
         p = 100.0
     return p
 
+# Exportiert Overlays für die besten Features pro Layer
 
 def _export_per_layer_best(
     winners: Dict[int, List[Tuple[int, float]]],
@@ -85,10 +64,8 @@ def _export_per_layer_best(
     overlay_limit_per_feature: Optional[int] = None,
     gc_every_n: int = 250,
 ) -> None:
-    """Erzeugt Overlays für beste Features pro Layer (ggf. mehrere bei Tie) on-the-fly."""
     if not winners:
         return
-    # Dritter Pass: alle Inputs durchgehen und nur Winner schreiben
     written_per_feat: Dict[Tuple[int, int], int] = {}
     n_since_gc = 0
     for item in iter_iou_inputs(encoder_out_dir=encoder_out_dir, mask_dir=mask_dir):
@@ -103,7 +80,6 @@ def _export_per_layer_best(
                 break
         if thr is None:
             continue
-        # Limit pro Feature beachten (falls gesetzt)
         if overlay_limit_per_feature is not None and written_per_feat.get(key, 0) >= int(overlay_limit_per_feature):
             continue
         layer_dir = os.path.join(export_root, f"layer{item.layer_idx}")
@@ -115,12 +91,12 @@ def _export_per_layer_best(
         written_per_feat[key] = written_per_feat.get(key, 0) + 1
         n_since_gc += 1
         if overlay_limit_per_feature is not None and written_per_feat[key] >= int(overlay_limit_per_feature):
-            # keine weiteren Bilder für dieses Feature
             pass
         if n_since_gc >= int(gc_every_n):
             gc.collect()
             n_since_gc = 0
 
+# Exportiert pro Layer das beste Feature in mask_dir/layerX
 
 def _export_per_layer_best_rot(
     layer_best_single: Dict[int, Tuple[int, float]],
@@ -130,8 +106,6 @@ def _export_per_layer_best_rot(
     overlay_limit_per_feature: Optional[int] = None,
     gc_every_n: int = 250,
 ) -> None:
-    """Exportiert pro Layer exakt EIN bestes Feature nach mask_dir/layerX (on-the-fly)."""
-    # Dritter Pass: Nur die besten je Layer schreiben
     written_per_layer: Dict[int, int] = {}
     n_since_gc = 0
     for item in iter_iou_inputs(encoder_out_dir=encoder_out_dir, mask_dir=None):
@@ -141,7 +115,6 @@ def _export_per_layer_best_rot(
         fidx, thr = sel
         if item.feature_idx != fidx:
             continue
-        # Limit beachten (falls gesetzt)
         if overlay_limit_per_feature is not None and written_per_layer.get(item.layer_idx, 0) >= int(overlay_limit_per_feature):
             continue
         layer_out_dir = os.path.join(mask_dir, f"layer{item.layer_idx}")
@@ -152,12 +125,13 @@ def _export_per_layer_best_rot(
         written_per_layer[item.layer_idx] = written_per_layer.get(item.layer_idx, 0) + 1
         n_since_gc += 1
         if overlay_limit_per_feature is not None and written_per_layer[item.layer_idx] >= int(overlay_limit_per_feature):
-            # Kappung pro Layer (falls gewünscht)
             pass
         if n_since_gc >= int(gc_every_n):
             gc.collect()
             n_since_gc = 0
 
+
+# Für das globale beste Feature wollen wir ein zusätzliches Overlay exportieren
 
 def _export_global_best(
     global_best: Optional[Dict[str, object]],
@@ -166,7 +140,6 @@ def _export_global_best(
     combine: str,
     mask_dir: Optional[str] = None,
 ) -> None:
-    """Exportiert global_best: nur das beste Bild des global besten Features (on-the-fly)."""
     if global_best is None:
         logger.info("Keine globalen Bestwerte gefunden – Überspringe global_best-Export.")
         return
@@ -179,8 +152,6 @@ def _export_global_best(
 
     global_export_root = os.path.join(export_root, "global_best")
     _ensure_dir(global_export_root)
-
-    # Falls best_image_id bekannt: nur dieses Bild rendern
     best_overlay_path = None
     for item in iter_iou_inputs(encoder_out_dir=encoder_out_dir, mask_dir=mask_dir):
         if item.layer_idx != gb_layer or item.feature_idx != gb_feat:
@@ -194,8 +165,6 @@ def _export_global_best(
         _save_overlay_comparison(best_overlay_path, item.mask_input, heatmap, gb_thr)
         gb_best_img_id = item.image_id
         break
-
-    # optionale Metadatei
     try:
         info = {
             "layer_idx": gb_layer,
@@ -221,6 +190,7 @@ def _export_global_best(
             best_overlay_path,
         )
 
+# Hauptfunktion für den Network Dissection Export mit per-Feature Thresholding
 
 def main_export_network_dissection(
     percentile: Optional[float] = None,
@@ -229,7 +199,6 @@ def main_export_network_dissection(
     encoder_out_dir: Optional[str] = None,
     export_root: Optional[str] = None,
     export_mode: str = "per-layer-best",
-    # neue Optionen
     approx_method: str = "reservoir",  # oder "histogram"
     reservoir_size: int = 200_000,
     num_bins: int = 1024,
@@ -237,7 +206,6 @@ def main_export_network_dissection(
     write_individual_ious: bool = False,
     gc_every_n: int = 250,
 ) -> None:
-    """Network Dissection Pipeline mit per-Feature Thresholding (streaming, bounded memory)."""
     t0 = time.time()
     # Prozentil bestimmen (robuste Interpretation)
     percentile_val = resolve_percentile(percentile, top_percent_active)
@@ -259,10 +227,6 @@ def main_export_network_dissection(
     if not layer_csvs:
         logger.info("Keine Daten gefunden. Bitte zuvor die Extraktion ausführen.")
         return
-
-    # ------------------
-    # Pass 1: Threshold-Discovery (Streaming)
-    # ------------------
     logger.info("Pass 1: Sammle Streaming-Statistiken je Feature (%s)…", approx_method)
     stats: Dict[Tuple[int, int], FeatureStats] = {}
     n_seen_rows = 0
@@ -307,16 +271,12 @@ def main_export_network_dissection(
                 if n_since_gc >= int(gc_every_n):
                     gc.collect()
                     n_since_gc = 0
-
-    # Schwellen je Feature bestimmen und persistieren
     thresholds: Dict[Tuple[int, int], float] = {
         k: v.compute_threshold(percentile_val) for k, v in stats.items()
     }
     thr_json = {f"layer{k[0]}_feature{k[1]}": float(v) for k, v in thresholds.items()}
     with open(os.path.join(export_root, "thresholds.json"), "w", encoding="utf-8") as f:
         json.dump(thr_json, f, ensure_ascii=False, indent=2)
-
-    # Zähle Bilder pro Feature (für Abschlusskriterium in Pass 2)
     images_per_feature: Dict[Tuple[int, int], int] = {k: 0 for k in thresholds.keys()}
     for lidx, csv_path in layer_csvs:
         for _image_id, feat_idx, _tokens in _iter_csv_rows(csv_path):
@@ -324,9 +284,6 @@ def main_export_network_dissection(
             if key in images_per_feature:
                 images_per_feature[key] += 1
 
-    # ------------------
-    # Pass 2: mIoU, Best-Feature pro Layer, CSV sammeln
-    # ------------------
     logger.info("Pass 2: Berechne mIoU pro Feature und wähle Gewinner…")
 
     class _RunFeat:
@@ -373,13 +330,10 @@ def main_export_network_dissection(
         if n_since_gc >= int(gc_every_n):
             gc.collect()
             n_since_gc = 0
-
-    # Abschluss: Zeilen pro Feature erzeugen, Bestwerte je Layer bestimmen
     for (lidx, fidx), rf in running.items():
         if rf.n_target <= 0:
             continue
         if rf.count != rf.n_target:
-            # fehlende Daten tolerieren, aber berechenbar machen
             logger.debug("Feature (L%s,F%s): erwartet %s Bilder, gesehen %s", lidx, fidx, rf.n_target, rf.count)
         n_img = max(1, rf.count)
         miou = rf.sum_iou / float(n_img)
@@ -395,8 +349,6 @@ def main_export_network_dissection(
             "overlay_dir": "",
         }
         per_layer_rows.setdefault(int(lidx), []).append(row)
-
-        # Bestes Feature pro Layer updaten (Tie -> sammeln)
         best = per_layer_best.get(int(lidx))
         if best is None:
             per_layer_best[int(lidx)] = {
@@ -406,27 +358,26 @@ def main_export_network_dissection(
                 ],
             }
         else:
-            cur_best = float(best["best_miou"])  # type: ignore
+            cur_best = float(best["best_miou"])
             if float(miou) > cur_best + 1e-12:
                 best["best_miou"] = float(miou)
                 best["features"] = [
                     {"feature_idx": int(fidx), "threshold": float(rf.threshold), "best_image_id": rf.best_img_id, "best_image_iou": float(rf.best_img_iou)},
                 ]
             elif abs(float(miou) - cur_best) <= 1e-12:
-                best.setdefault("features", []).append(  # type: ignore
+                best.setdefault("features", []).append(
                     {"feature_idx": int(fidx), "threshold": float(rf.threshold), "best_image_id": rf.best_img_id, "best_image_iou": float(rf.best_img_iou)}
                 )
 
     if export_mode == "per-layer-best-rot":
         if mask_dir is None:
             raise ValueError("mask_dir muss gesetzt sein für export_mode='per-layer-best-rot'")
-        # Pro Layer genau ein bestes Feature wählen (bei Tie: kleinstes Feature)
         layer_best_single: Dict[int, Tuple[int, float]] = {}
         for lidx, best in per_layer_best.items():
-            feats = best.get("features", [])  # type: ignore
+            feats = best.get("features", [])
             if not feats:
                 continue
-            chosen = sorted(feats, key=lambda fi: int(fi["feature_idx"]))[0]  # type: ignore
+            chosen = sorted(feats, key=lambda fi: int(fi["feature_idx"]))[0]
             layer_best_single[int(lidx)] = (int(chosen["feature_idx"]), float(chosen["threshold"]))  # type: ignore
         logger.info("Pass 3: Exportiere pro Layer NUR das jeweils beste Feature nach mask_dir/layerX …")
         _export_per_layer_best_rot(
@@ -440,34 +391,30 @@ def main_export_network_dissection(
         logger.info("Fertig: Overlays pro Layer unter mask_dir/layerX gespeichert.")
         return
 
-    # Bestimme globale Gewinner und baue Overlay-Ziele
     global_best: Optional[Dict[str, object]] = None
     winners: Dict[int, List[Tuple[int, float]]] = {}
     for lidx, best in per_layer_best.items():
-        feats = best.get("features", [])  # type: ignore
+        feats = best.get("features", [])
         if not feats:
             continue
         if export_mode == "global-best":
-            candidate = sorted(feats, key=lambda fi: int(fi["feature_idx"]))[0]  # type: ignore
-            # global_best wird später verglichen
+            candidate = sorted(feats, key=lambda fi: int(fi["feature_idx"]))[0]
             if (global_best is None) or (float(best["best_miou"]) > float(global_best["miou"])):
                 global_best = {
                     "layer_idx": int(lidx),
-                    "feature_idx": int(candidate["feature_idx"]),  # type: ignore
-                    "miou": float(best["best_miou"]),  # type: ignore
-                    "threshold": float(candidate["threshold"]),  # type: ignore
-                    "best_image_id": str(candidate.get("best_image_id", "")),  # type: ignore
-                    "best_image_iou": float(candidate.get("best_image_iou", 0.0)),  # type: ignore
+                    "feature_idx": int(candidate["feature_idx"]),
+                    "miou": float(best["best_miou"]),
+                    "threshold": float(candidate["threshold"]),
+                    "best_image_id": str(candidate.get("best_image_id", "")),
+                    "best_image_iou": float(candidate.get("best_image_iou", 0.0)),
                 }
-        else:  # per-layer-best
-            winners[int(lidx)] = [(int(fi["feature_idx"]), float(fi["threshold"])) for fi in feats]  # type: ignore
+        else:
+            winners[int(lidx)] = [(int(fi["feature_idx"]), float(fi["threshold"])) for fi in feats]
 
     if export_mode == "global-best":
         winners = {}
         if global_best is not None:
-            winners[int(global_best["layer_idx"]) ] = [(int(global_best["feature_idx"]), float(global_best["threshold"]))]  # type: ignore
-
-    # CSVs pro Layer schreiben (overlay_dir für Gewinner ausfüllen)
+            winners[int(global_best["layer_idx"]) ] = [(int(global_best["feature_idx"]), float(global_best["threshold"]))]
     for lidx, rows in per_layer_rows.items():
         layer_dir = os.path.join(export_root, f"layer{lidx}")
         _ensure_dir(layer_dir)
@@ -480,14 +427,12 @@ def main_export_network_dissection(
 
         rows_sorted = sorted(rows, key=lambda r: r.get("miou", 0.0), reverse=True)
         for r in rows_sorted:
-            fidx = int(r["feature_idx"])  # type: ignore
+            fidx = int(r["feature_idx"])
             if fidx in overlay_map:
                 r["overlay_dir"] = overlay_map[fidx]
 
         csv_path = os.path.join(layer_dir, "miou_network_dissection.csv")
         _write_network_dissection_csv(csv_path, rows_sorted)
-
-    # Pass 3: Overlays für Gewinner-Features
     logger.info("Pass 3: Erzeuge Overlays für Gewinner-Features…")
     _export_per_layer_best(
         winners=winners,
@@ -498,8 +443,6 @@ def main_export_network_dissection(
         overlay_limit_per_feature=overlay_limit_per_feature,
         gc_every_n=gc_every_n,
     )
-
-    # Global_best-Overlay (nur ein Bild)
     _export_global_best(global_best, export_root=export_root, encoder_out_dir=encoder_out_dir, combine=DEFAULT_COMBINE, mask_dir=mask_dir)
     logger.info("Network Dissection Export abgeschlossen in %.2fs. Root: %s", time.time() - t0, export_root)
 

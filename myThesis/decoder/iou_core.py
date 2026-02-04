@@ -7,17 +7,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Das berechnen der Map welche Werte wichtig sind, passiert hier über ein Dot-Produkt von dem jeweiligen Query mit dem Pixel-Embedding
 
 def _compute_query_response_map(query_features: np.ndarray, pixel_embedding: np.ndarray) -> np.ndarray:
-    """Compute response map as dot-product between query and pixel embeddings.
-
-    Args:
-        query_features: shape [C]
-        pixel_embedding: shape [C, H, W]
-
-    Returns:
-        response_map: shape [H, W] (float32)
-    """
 
     q = np.asarray(query_features, dtype=np.float32)
     pe = np.asarray(pixel_embedding, dtype=np.float32)
@@ -29,31 +21,15 @@ def _compute_query_response_map(query_features: np.ndarray, pixel_embedding: np.
     if pe.shape[0] != q.shape[0]:
         raise ValueError(f"Channel mismatch: query C={q.shape[0]} vs embedding C={pe.shape[0]}")
 
-    # Dot over channel dimension
-    # pe: [C,H,W], q: [C] -> (H,W)
     H, W = pe.shape[1], pe.shape[2]
     response = np.tensordot(q, pe, axes=(0, 0)).astype(np.float32)
     if response.shape != (H, W):
         response = response.reshape(H, W)
     return response
 
+# Wir skalieren die Map zurück in seine ursprüngliche 2D Input-Größe
 
 def scale_to_input_size(response_map: np.ndarray, target_size: Tuple[int, int]) -> np.ndarray:
-    """Resize a 2D response map to (H, W) using bilinear interpolation.
-
-    Ziel: feinere, pixelgenaue Heatmaps für die anschließende Binarisierung,
-    wie in gängigen Network-Dissection-Setups üblich. Die per-Query Schwelle
-    bleibt unverändert (aus Verteilungen der ursprünglichen Feature-Map),
-    angewendet wird sie auf die auf Eingabegröße bilinear hochgerechnete
-    Response-Map.
-
-    Hinweis: Falls streng blockige Masken gewünscht sind (z. B. für
-    Aktivierungs-Massenerhaltung auf dem Feature-Grid), wäre "nearest"
-    geeignet. Für feinkörnige Visuals und pixelgenaue Vorhersageflächen ist
-    bilinear vorzuziehen.
-
-    Lazy-imports OpenCV to avoid hard dependency at import time.
-    """
 
     try:
         import cv2  # type: ignore
@@ -67,19 +43,16 @@ def scale_to_input_size(response_map: np.ndarray, target_size: Tuple[int, int]) 
     resized = cv2.resize(rm, (Win, Hin), interpolation=cv2.INTER_LINEAR)
     return resized
 
+# Wir haben nen Threshold pro Query und den wenden wir hier für die Binarisierung an
 
 def apply_per_query_binarization(heatmap: np.ndarray, threshold: float) -> np.ndarray:
-    """Binarize heatmap using a per-query threshold (>=). Returns uint8 mask."""
 
     hm = np.asarray(heatmap, dtype=np.float32)
     return (hm >= float(threshold)).astype(np.uint8)
 
+# Jetzt können wir die überschneidung zweier Masken berechnen und bekommen so die IoU
 
 def compute_iou(mask1: np.ndarray, mask2: np.ndarray) -> float:
-    """Compute IoU between two boolean/0-1 masks.
-
-    Returns 0.0 when the union is zero.
-    """
 
     m1 = mask1.astype(bool)
     m2 = mask2.astype(bool)

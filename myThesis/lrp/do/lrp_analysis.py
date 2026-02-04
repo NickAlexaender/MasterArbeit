@@ -1,55 +1,22 @@
-"""
-LRP Analyse - High-Level Tools für LRP-Analyse.
-
-Dieses Modul enthält Batch-Verarbeitung und Context Manager für
-die einfache Verwendung der LRP-Analyse.
-
-Performance-Features:
-- Batch-Processing für mehrere Bilder mit geteiltem Forward-Pass
-- Memory-optimierte Verarbeitung pro Layer
-- Automatisches Garbage Collection zwischen Analysen
-- Konfigurierbare Batch-Größen basierend auf verfügbarem Speicher
-
-Verwendung:
-    >>> from lrp_analysis import run_lrp_analysis, LRPAnalysisContext
-    >>> with LRPAnalysisContext(model) as controller:
-    ...     result = controller.run(inputs)
-    
-Performance-optimierte Verwendung:
-    >>> from lrp_analysis import BatchLRPProcessor
-    >>> processor = BatchLRPProcessor(model, batch_size=4)
-    >>> results = processor.process_directory("images/")
-"""
 from __future__ import annotations
-
 import gc
 import logging
 import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Generator, Iterator, List, Optional, Tuple, Union
-
 import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
-
 from .io_utils import collect_images
 from .lrp_structs import LRPResult
 from .tensor_ops import aggregate_channel_relevance
 
 
-# =============================================================================
-# Logging Setup
-# =============================================================================
-
 logger = logging.getLogger("lrp.analysis")
 
-
-# =============================================================================
-# Batch-Analyse
-# =============================================================================
-
+# Wir wollen LRP-Analysen über einen Ordner mit Bildern durchführen und die Ergebnisse speichern
 
 def run_lrp_analysis(
     model: nn.Module,
@@ -60,22 +27,9 @@ def run_lrp_analysis(
     device: str = "cpu",
     verbose: bool = False,
 ) -> None:
-    """Führt LRP-Analyse über einen Ordner mit Bildern durch.
-    
-    Args:
-        model: Das vorbereitete Modell
-        images_dir: Pfad zum Bildordner
-        output_csv: Ausgabepfad für CSV-Ergebnisse
-        target_class: Zielklasse für Attribution
-        target_query: Ziel-Query-Index
-        device: Berechnungsgerät
-        verbose: Ausführliches Logging
-    """
     import pandas as pd
     from PIL import Image
     from detectron2.data import transforms as T
-    
-    # Importiere LRPController hier, um zirkuläre Imports zu vermeiden
     from .lrp_controller import LRPController
     
     controller = LRPController(model, device=device, verbose=verbose)
@@ -85,8 +39,6 @@ def run_lrp_analysis(
     img_files = collect_images(images_dir)
     if not img_files:
         raise FileNotFoundError(f"Keine Bilder in {images_dir}")
-    
-    # Bildvorverarbeitung
     resize_aug = T.ResizeShortestEdge(
         short_edge_length=800,
         max_size=1333,
@@ -135,14 +87,13 @@ def run_lrp_analysis(
         except Exception as e:
             logger.error(f"Fehler bei {img_path}: {e}")
             continue
-    
-    # Speichere Ergebnisse
     if results:
         df = pd.DataFrame(results)
         os.makedirs(os.path.dirname(output_csv) or ".", exist_ok=True)
         df.to_csv(output_csv, index=False)
         logger.info(f"Ergebnisse gespeichert: {output_csv}")
 
+# Wir müssen eine Batch-Version der LRP-Analyse bereitstellen
 
 def run_lrp_batch(
     controller,
@@ -151,21 +102,6 @@ def run_lrp_batch(
     target_query: int = 0,
     normalize: str = "sum1",
 ) -> List[LRPResult]:
-    """Führt LRP-Analyse für mehrere Eingaben durch.
-    
-    Effizienter als wiederholte Aufrufe von controller.run(), da
-    Speicher zwischen Analysen bereinigt wird.
-    
-    Args:
-        controller: Ein vorbereiteter LRPController
-        inputs_list: Liste von Eingaben (Tensor oder Detectron2-Batch)
-        target_class: Zielklasse für Attribution
-        target_query: Ziel-Query-Index
-        normalize: Normalisierungsmethode
-        
-    Returns:
-        Liste von LRPResult Objekten
-    """
     results = []
     
     for i, inputs in enumerate(inputs_list):
@@ -190,51 +126,22 @@ def run_lrp_batch(
     return results
 
 
-# =============================================================================
-# Context Manager
-# =============================================================================
-
+# Wir müssen sicher stellen, dass Aktivierungen bereinigt und der LRP-Modus zurückgesetzt wird.
 
 class LRPAnalysisContext:
-    """Context Manager für sichere LRP-Analyse.
-    
-    Stellt sicher, dass Aktivierungen bereinigt und der LRP-Modus
-    zurückgesetzt wird, auch bei Exceptions.
-    
-    Example:
-        >>> with LRPAnalysisContext(model) as controller:
-        ...     result = controller.run(inputs)
-        
-    Attributes:
-        controller: Der interne LRPController
-    """
     
     def __init__(self, model: nn.Module, **kwargs):
-        """Initialisiert den Context Manager.
-        
-        Args:
-            model: Das zu analysierende Modell
-            **kwargs: Zusätzliche Argumente für LRPController
-        """
-        # Importiere LRPController hier, um zirkuläre Imports zu vermeiden
+        # Importiere LRPController hier
         from .lrp_controller import LRPController
         self.controller = LRPController(model, **kwargs)
     
     def __enter__(self):
-        """Bereitet den Controller vor und gibt ihn zurück."""
         self.controller.prepare()
         return self.controller
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Bereinigt Aktivierungen und Speicher."""
         self.controller.cleanup()
         return False
-
-
-# =============================================================================
-# Exports
-# =============================================================================
-
 
 __all__ = [
     "run_lrp_analysis",
@@ -245,28 +152,10 @@ __all__ = [
     "estimate_memory_requirements",
 ]
 
-
-# =============================================================================
-# Performance-Konfiguration
-# =============================================================================
-
+# Wichtig ist, dass die Memory nie voll ist und wir das ganze in einem effizienten Batch durchlaufen
 
 @dataclass
 class LRPPerformanceConfig:
-    """Konfiguration für Performance-optimierte LRP-Analyse.
-    
-    Diese Konfiguration steuert das Memory-Management und die
-    Batch-Verarbeitung für effiziente LRP-Analysen.
-    
-    Attributes:
-        batch_size: Anzahl der Bilder pro Batch (0 = automatisch)
-        max_memory_mb: Maximaler Speicherverbrauch in MB (0 = unbegrenzt)
-        gc_frequency: Garbage Collection alle N Bilder
-        clear_activations_each_layer: Aktivierungen nach jedem Layer löschen
-        store_intermediate_results: Zwischenergebnisse speichern
-        use_float16: Half-Precision für Aktivierungen verwenden
-        num_workers: Anzahl der Worker für Datenladung
-    """
     batch_size: int = 1
     max_memory_mb: int = 0
     gc_frequency: int = 1
@@ -277,7 +166,6 @@ class LRPPerformanceConfig:
     
     @classmethod
     def for_low_memory(cls) -> "LRPPerformanceConfig":
-        """Konfiguration für Systeme mit wenig Speicher."""
         return cls(
             batch_size=1,
             gc_frequency=1,
@@ -288,7 +176,6 @@ class LRPPerformanceConfig:
     
     @classmethod
     def for_high_throughput(cls) -> "LRPPerformanceConfig":
-        """Konfiguration für maximalen Durchsatz."""
         return cls(
             batch_size=4,
             gc_frequency=4,
@@ -297,11 +184,7 @@ class LRPPerformanceConfig:
             use_float16=False,
         )
 
-
-# =============================================================================
-# Memory-Schätzung
-# =============================================================================
-
+# Wir schätzen den Speicherbedarf
 
 def estimate_memory_requirements(
     image_size: Tuple[int, int] = (800, 1333),
@@ -311,19 +194,6 @@ def estimate_memory_requirements(
     num_queries: int = 300,
     dtype: torch.dtype = torch.float32,
 ) -> Dict[str, float]:
-    """Schätzt den Speicherbedarf für LRP-Analyse.
-    
-    Args:
-        image_size: (Höhe, Breite) des Eingabebildes
-        hidden_dim: Dimension der versteckten Schichten (256 für MaskDINO)
-        num_encoder_layers: Anzahl der Encoder-Layers (6 für MaskDINO)
-        num_decoder_layers: Anzahl der Decoder-Layers (3 für MaskDINO)
-        num_queries: Anzahl der Object-Queries (300 für MaskDINO)
-        dtype: Datentyp der Tensoren
-        
-    Returns:
-        Dictionary mit Speicherschätzungen in MB
-    """
     bytes_per_element = 4 if dtype == torch.float32 else 2
     
     # Encoder-Tokens: Multi-Scale Feature Maps (100x100 + 50x50 + 25x25)
@@ -365,28 +235,9 @@ def estimate_memory_requirements(
     return estimates
 
 
-# =============================================================================
-# Batch-Processing
-# =============================================================================
-
+# Nun führen wir bachweise LRP-Analysen durch, allerdings Memory-optimiert
 
 class BatchLRPProcessor:
-    """Memory-optimierter Batch-Processor für LRP-Analysen.
-    
-    Diese Klasse ermöglicht die effiziente Verarbeitung vieler Bilder
-    mit kontrollierbarem Speicherverbrauch und automatischer Batch-Größen-
-    Anpassung.
-    
-    Example:
-        >>> processor = BatchLRPProcessor(model, batch_size=2)
-        >>> for result in processor.process_images(image_paths):
-        ...     print(f"Relevanz-Summe: {result.R_input.sum():.4f}")
-        
-    Attributes:
-        model: Das MaskDINO-Modell
-        config: Performance-Konfiguration
-        controller: Interner LRP-Controller (lazy initialization)
-    """
     
     def __init__(
         self,
@@ -395,14 +246,6 @@ class BatchLRPProcessor:
         device: str = "cpu",
         verbose: bool = False,
     ):
-        """Initialisiert den Batch-Processor.
-        
-        Args:
-            model: Das zu analysierende Modell
-            config: Performance-Konfiguration (optional)
-            device: Berechnungsgerät
-            verbose: Ausführliches Logging
-        """
         self.model = model
         self.config = config or LRPPerformanceConfig()
         self.device = device
@@ -416,7 +259,6 @@ class BatchLRPProcessor:
     
     @property
     def controller(self):
-        """Lazy initialization des LRP-Controllers."""
         if self._controller is None:
             from .lrp_controller import LRPController
             self._controller = LRPController(
@@ -428,7 +270,6 @@ class BatchLRPProcessor:
         return self._controller
     
     def _maybe_gc(self, force: bool = False) -> None:
-        """Führt Garbage Collection durch wenn nötig."""
         should_gc = force or (
             self._stats["images_processed"] % self.config.gc_frequency == 0
         )
@@ -443,7 +284,6 @@ class BatchLRPProcessor:
         img_path: str,
         resize_aug,
     ) -> Optional[Dict]:
-        """Lädt und bereitet ein Bild für das Modell vor."""
         try:
             from PIL import Image
             
@@ -478,20 +318,6 @@ class BatchLRPProcessor:
         target_query: int = 0,
         normalize: str = "sum1",
     ) -> Generator[Tuple[str, LRPResult], None, None]:
-        """Generator der LRP-Ergebnisse für eine Liste von Bildern liefert.
-        
-        Memory-optimiert: Verarbeitet Bilder einzeln und gibt Speicher frei.
-        
-        Args:
-            image_paths: Liste der Bildpfade
-            which_module: "encoder" oder "decoder"
-            target_feature: Ziel-Feature-Index (für Encoder)
-            target_query: Ziel-Query-Index (für Decoder)
-            normalize: Normalisierungsmethode
-            
-        Yields:
-            Tuple aus (image_path, LRPResult)
-        """
         from detectron2.data import transforms as T
         
         resize_aug = T.ResizeShortestEdge(
@@ -545,15 +371,6 @@ class BatchLRPProcessor:
         directory: str,
         **kwargs,
     ) -> Generator[Tuple[str, LRPResult], None, None]:
-        """Verarbeitet alle Bilder in einem Verzeichnis.
-        
-        Args:
-            directory: Pfad zum Bildverzeichnis
-            **kwargs: Weitere Argumente für process_images
-            
-        Yields:
-            Tuple aus (image_path, LRPResult)
-        """
         image_paths = collect_images(directory)
         if not image_paths:
             logger.warning(f"Keine Bilder in {directory}")
@@ -563,7 +380,6 @@ class BatchLRPProcessor:
         yield from self.process_images(image_paths, **kwargs)
     
     def get_stats(self) -> Dict[str, float]:
-        """Gibt Verarbeitungsstatistiken zurück."""
         stats = self._stats.copy()
         if stats["images_processed"] > 0 and stats["total_time_sec"] > 0:
             stats["images_per_second"] = stats["images_processed"] / stats["total_time_sec"]
@@ -580,23 +396,9 @@ class BatchLRPProcessor:
             torch.cuda.empty_cache()
 
 
-# =============================================================================
-# Memory-optimierte LRP-Klasse
-# =============================================================================
-
+# Wir implementieren nun einen memory-optimierten versuch von LRP, um noch schneller und effizienter zu werden
 
 class MemoryOptimizedLRP:
-    """Context Manager für memory-optimierte LRP-Analyse.
-    
-    Implementiert verschiedene Strategien zur Reduzierung des Speicherverbrauchs:
-    1. Layer-by-Layer Verarbeitung mit sofortigem Cleanup
-    2. Optional Float16 für Aktivierungen
-    3. Nur notwendige Tensoren speichern
-    
-    Example:
-        >>> with MemoryOptimizedLRP(model) as lrp:
-        ...     result = lrp.analyze(image, which_module="encoder", target_feature=42)
-    """
     
     def __init__(
         self,
@@ -638,18 +440,6 @@ class MemoryOptimizedLRP:
         target_query: int = 0,
         normalize: str = "sum1",
     ) -> LRPResult:
-        """Führt memory-optimierte LRP-Analyse durch.
-        
-        Args:
-            inputs: Eingabe-Tensor oder Detectron2-Batch
-            which_module: "encoder" oder "decoder"
-            target_feature: Ziel-Feature-Index (für Encoder)
-            target_query: Ziel-Query-Index (für Decoder)
-            normalize: Normalisierungsmethode
-            
-        Returns:
-            LRPResult mit minimalen Daten (nur R_input)
-        """
         if self._controller is None:
             raise RuntimeError("MemoryOptimizedLRP muss als Context Manager verwendet werden")
         
@@ -677,25 +467,14 @@ class MemoryOptimizedLRP:
         
         return minimal_result
     
+    # Generator für memory-optimierte Analyse aller Queries
+    
     def analyze_all_queries(
         self,
         inputs: Union[Tensor, List[Dict]],
         num_queries: int = 300,
         normalize: str = "sum1",
     ) -> Iterator[Tuple[int, Tensor]]:
-        """Generator für memory-optimierte Analyse aller Queries.
-        
-        Statt alle 300 Queries im Speicher zu halten, wird jede Query
-        einzeln verarbeitet und sofort zurückgegeben.
-        
-        Args:
-            inputs: Eingabe-Tensor oder Detectron2-Batch
-            num_queries: Anzahl der Queries
-            normalize: Normalisierungsmethode
-            
-        Yields:
-            Tuple aus (query_index, relevance_tensor)
-        """
         if self._controller is None:
             raise RuntimeError("MemoryOptimizedLRP muss als Context Manager verwendet werden")
         
@@ -721,14 +500,12 @@ class MemoryOptimizedLRP:
                 if normalize == "sum1":
                     R_start_full = R_start_full / (R_start_full.abs().sum() + 1e-12)
                 
-                # Backward-Pass (ohne Aktivierungen zu löschen)
+                # Backward-Pass
                 result = self._controller.backward_pass(
                     R_start_full,
                     which_module="decoder",
                     clear_activations=False,
                 )
-                
-                # Nur Relevanz-Tensor zurückgeben
                 if result.R_input is not None:
                     yield (query_idx, result.R_input.detach().cpu())
                 else:

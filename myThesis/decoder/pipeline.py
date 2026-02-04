@@ -1,9 +1,13 @@
-from __future__ import annotations
+# Hier haben wir 4 Schritte in der Pipeline: 
+# - Berechnung der Thresholds, 
+# - Berechnung der mIoUs, 
+# - Export der CSVs,
+# - Erstellung der Visualisierungen
 
+from __future__ import annotations
 import logging
 import os
 from typing import Dict, List, Optional, Tuple
-
 from .config import DEFAULT_PERCENTILE
 from .io_utils import decoder_out_dir as _decoder_out_dir_default
 from .io_utils import mask_dir as _mask_dir_default
@@ -13,21 +17,12 @@ from .export_utils import export_mean_iou_csv, create_best_query_visualizations
 
 logger = logging.getLogger(__name__)
 
-
 def main_network_dissection_per_query(
     percentile: float = DEFAULT_PERCENTILE,
     mask_dir: Optional[str] = None,
     decoder_out_dir: Optional[str] = None,
     export_root: Optional[str] = None,
 ) -> None:
-    """Run the 4-step network dissection pipeline with per-query thresholding.
-
-    Steps:
-    1) Compute per-query thresholds
-    2) Compute mIoU per query
-    3) Export CSVs
-    4) Create best-query visualizations
-    """
 
     decoder_out_dir = _decoder_out_dir_default(decoder_out_dir)
     mask_dir = _mask_dir_default(mask_dir)

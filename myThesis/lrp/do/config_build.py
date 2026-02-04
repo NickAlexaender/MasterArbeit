@@ -1,19 +1,11 @@
-"""
-Model configuration builder and constants for MaskDINO inference.
-Includes DEFAULT_WEIGHTS and add_maskdino_config wiring.
-"""
 from __future__ import annotations
-
 import os
 import sys
-
 from detectron2.config import get_cfg
-from detectron2.data import MetadataCatalog  # Imported for potential dataset metadata wiring
-
-# Import der zentralen Modell-Konfiguration
+from detectron2.data import MetadataCatalog
 from myThesis.model_config import get_model_config, get_num_classes, get_dataset_name
 
-# Make MaskDINO importable (as in original script)
+
 MASKDINO_PATH = "/Users/nicklehmacher/Alles/MasterArbeit/MaskDINO"
 if MASKDINO_PATH not in sys.path:
     sys.path.insert(0, MASKDINO_PATH)

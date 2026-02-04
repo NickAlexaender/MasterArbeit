@@ -8,6 +8,9 @@ numpy>=2.2.6
 pandas>=2.2.0
 openpyxl>=3.1.2
 
+# Für Linear Probing (Logistische Regression, SGD)
+scikit-learn>=1.5.0
+
 
 # Currently given requirements (from maskdino-arm conda environment):
 absl-py==2.3.1

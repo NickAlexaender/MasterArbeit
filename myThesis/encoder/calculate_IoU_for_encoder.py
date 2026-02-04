@@ -1,7 +1,4 @@
-"""Ausführungsdatei für die Network-Dissection-Pipeline.
-
-Hält nur Logging-Setup und einen klaren Funktionsaufruf, der die Pipeline startet.
-"""
+# Hier definieren wir die Default optimalen Parameter für die Main
 
 from __future__ import annotations
 
@@ -20,7 +17,6 @@ def main(
     export_root: Optional[str] = None,
     export_mode: str = "per-layer-best",
 ) -> None:
-    """Startet die Network-Dissection-Pipeline mit optionalen Parametern."""
     configure_logging(LOG_LEVEL)
     logging.getLogger(__name__).info("Starte Network Dissection Pipeline…")
     run_network_dissection(

@@ -1,3 +1,6 @@
+
+# Vorbereitung des Transformer Decoder in MaskDINO auf Network Dissection.
+
 # --- Kompatibilitätsfixe (Pillow/NumPy) ---
 try:
     import PIL.Image

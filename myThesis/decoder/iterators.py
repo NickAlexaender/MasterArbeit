@@ -18,12 +18,9 @@ from .models import DecoderIoUInput
 
 logger = logging.getLogger(__name__)
 
+# Suche alle Layer und ihre Queries auf um die Daten zu verwenden
 
 def find_layer_csvs(base_dir: Optional[str] = None) -> List[Tuple[int, str]]:
-    """Find all layer*/Query.csv files and extract layer indices.
-
-    Returns list of (layer_idx, csv_path) sorted by layer.
-    """
 
     base = _default_decoder_out_dir(base_dir)
     if not os.path.isdir(base):
@@ -45,12 +42,10 @@ def find_layer_csvs(base_dir: Optional[str] = None) -> List[Tuple[int, str]]:
     results.sort(key=lambda x: x[0])
     return results
 
+# Suche aus den Daten die gedownloadeten Pixel-Embeddings raus
+# Die brauchen wir später für Berechnungen
 
 def load_all_pixel_embeddings(base_dir: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
-    """Load all available metadata and pixel embeddings.
-
-    Returns: {embedding_id: {"metadata": dict, "embedding": np.ndarray}}
-    """
 
     root = _default_decoder_out_dir(base_dir)
     pixel_embed_dir = os.path.join(root, "pixel_embeddings")
@@ -97,14 +92,10 @@ def load_all_pixel_embeddings(base_dir: Optional[str] = None) -> Dict[str, Dict[
 
     return out
 
+# Jedes Image hat sein eigenes Pixel-Embedding
+# Wir müssen also sicher gehen, dass die keys machten
 
 def select_pixel_embedding_for(image_id: str, all_embeddings: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Pick pixel embedding for a given image id.
-
-    Strategy:
-    1) Exact match on key = f"embed_{image_id}"
-    2) Scan metadata.image_id
-    """
 
     if not all_embeddings:
         return None
@@ -120,15 +111,12 @@ def select_pixel_embedding_for(image_id: str, all_embeddings: Dict[str, Dict[str
     logger.warning("No pixel embedding found for image_id='%s'", image_id)
     return None
 
+# Wir wollen für jedes Image die Datenpakete mit Layer, Query, Embedding und Maske zusammenstellen
 
 def iter_decoder_iou_inputs(
     decoder_out_dir: Optional[str] = None,
     mask_dir: Optional[str] = None,
 ) -> Iterator[DecoderIoUInput]:
-    """Stream DecoderIoUInput per row in layer*/Query.csv files.
-
-    Missing pixel embeddings or masks are logged and skipped.
-    """
 
     layer_csvs = find_layer_csvs(decoder_out_dir)
     all_embeddings = load_all_pixel_embeddings(decoder_out_dir)

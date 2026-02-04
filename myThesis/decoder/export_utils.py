@@ -15,6 +15,7 @@ from .mask_utils import save_overlay
 
 logger = logging.getLogger(__name__)
 
+# Wir exportieren die Angaben in ne CSV pro LAyer
 
 def export_mean_iou_csv(
     mean_iou_results: Dict[int, List[Dict[str, object]]],
@@ -22,7 +23,6 @@ def export_mean_iou_csv(
     export_root: Optional[str] = None,
     decoder_out_dir: Optional[str] = None,
 ) -> None:
-    """Export mIoU results to CSV per layer."""
 
     root = resolve_export_root(export_root, decoder_out_dir)
     logger.info("Exporting mIoU CSVs to: %s", root)
@@ -40,6 +40,11 @@ def export_mean_iou_csv(
 
         logger.info("Layer %d: %d queries -> %s", layer_idx, len(results), csv_path)
 
+# Wir wollen auch sehen, wie die masken aussehen, deswegen visualisieren wir die besten.
+# Blau -> überschneidung
+# Rot -> vorhersage
+# Grün -> das was wir predicten
+# Schwarz -> alles andere
 
 def create_best_query_visualizations(
     mean_iou_results: Dict[int, List[Dict[str, object]]],
@@ -48,14 +53,6 @@ def create_best_query_visualizations(
     mask_dir: Optional[str] = None,
     export_root: Optional[str] = None,
 ) -> None:
-    """Create visualizations (overlays) for the best query per layer.
-
-    Colors (BGR):
-    - Red: mask only (FN)
-    - Blue: intersection (TP)
-    - Green: heatmap/predicted only (FP)
-    - Black: elsewhere (TN)
-    """
 
     root = resolve_export_root(export_root, decoder_out_dir)
     logger.info("Creating visualizations in: %s", root)

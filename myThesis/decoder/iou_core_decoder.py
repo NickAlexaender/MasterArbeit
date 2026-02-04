@@ -1,20 +1,4 @@
-"""
-IoU-Kernlogik für MaskDINO Decoder Network Dissection.
-
-Eingabe (pro Query):
-- layer_idx: int
-- image_id: str – Eindeutige Bild-ID (z.B. "image_1")
-- query_idx: int
-- query_features: np.ndarray, Shape (256,) – Query-Features für eine Query
-- pixel_embedding: np.ndarray, Shape (256, H, W) – Pixel-Embeddings vom Decoder
-- mask_input: np.ndarray[bool], Shape (H_in, W_in) – Ground-Truth Maske in Input-Größe
-
-Kernschritte:
-- Dot-Product zwischen Query-Features und Pixel-Embeddings berechnen
-- Auf Input-Größe skalieren 
-- Binarisieren (Schwellenwertstrategie konfigurierbar)
-- IoU mit mask_input berechnen
-"""
+# Kern von MaskDINO Decoder
 
 from __future__ import annotations
 
@@ -29,44 +13,22 @@ except Exception:  # pragma: no cover
     cv2 = None
 
 
-# -----------------------------
-# Datenstrukturen
-# -----------------------------
-
-# Hinweis: IoUResultDecoder wird nicht verwendet, da die Aufrufe aus calculate_IoU_for_decoder
-# direkt die Kernfunktionen (_compute_query_response_map, _scale_to_input_size, apply_per_query_binarization, _compute_iou)
-# nutzen. Daher entfernen wir diese Struktur.
-
-
 @dataclass 
 class DecoderIoUInput:
     layer_idx: int
-    image_id: str  # Geändert: image_id statt image_idx
+    image_id: str 
     query_idx: int
-    query_features: np.ndarray  # Shape: (256,)
-    pixel_embedding: np.ndarray  # Shape: (256, H, W) 
-    input_size: Tuple[int, int]  # (H_in, W_in)
-    mask_input: np.ndarray  # bool, Shape: (H_in, W_in)
+    query_features: np.ndarray
+    pixel_embedding: np.ndarray
+    input_size: Tuple[int, int]
+    mask_input: np.ndarray
 
-
-# -----------------------------
-# Kernfunktionen
-# -----------------------------
+# Das berechnen der Map welche Werte wichtig sind, passiert hier über ein Dot-Produkt von dem jeweiligen Query mit dem Pixel-Embedding
 
 def _compute_query_response_map(
     query_features: np.ndarray, 
     pixel_embedding: np.ndarray
 ) -> np.ndarray:
-    """
-    Berechnet Response-Map durch Dot-Product zwischen Query und Pixel-Embeddings.
-    
-    Args:
-        query_features: Shape (256,)
-        pixel_embedding: Shape (256, H, W)
-    
-    Returns:
-        response_map: Shape (H, W) - Aktivierungsstärke pro Pixel
-    """
     # Dot-Product: (256,) @ (256, H*W) -> (H*W) -> (H, W)
     _, H, W = pixel_embedding.shape
     pixel_flat = pixel_embedding.reshape(pixel_embedding.shape[0], -1)  # (256, H*W)
@@ -75,21 +37,12 @@ def _compute_query_response_map(
     
     return response_map
 
+# Dann müssen wir die Map noch zurück auf Input-Größe skalieren
 
 def _scale_to_input_size(
     response_map: np.ndarray, 
     target_size: Tuple[int, int]
 ) -> np.ndarray:
-    """
-    Skaliert Response-Map auf Input-Größe mittels bilinearer Interpolation.
-    
-    Args:
-        response_map: Shape (H, W)
-        target_size: (H_target, W_target)
-    
-    Returns:
-        scaled_map: Shape (H_target, W_target)
-    """
     if cv2 is None:
         raise RuntimeError("OpenCV (cv2) wird benötigt, ist aber nicht verfügbar.")
     
@@ -102,37 +55,20 @@ def _scale_to_input_size(
     return scaled
 
 
-# Die generische Threshold-Funktion wird nicht mehr benötigt (per-Query Threshold erfolgt extern)
+# Wir haben nen Threshold pro Query und den wenden wir hier für die Binarisierung an
 
 
 def apply_per_query_binarization(
     heatmap: np.ndarray,
     threshold: float,
 ) -> np.ndarray:
-    """
-    Binarisiert Heatmap mit vorberechnetem per-Query Threshold.
-    
-    Args:
-        heatmap: Shape (H, W) - skalierte Response-Map
-        threshold: vorberechneter Query-Threshold
-    
-    Returns:
-        binary_map: bool array, Shape (H, W)
-    """
     binary_map = heatmap >= threshold
     return binary_map
 
+# Jetzt können wir die überschneidung zweier Masken berechnen und bekommen so die IoU
 
 def _compute_iou(mask1: np.ndarray, mask2: np.ndarray) -> float:
-    """
-    Berechnet Intersection over Union zwischen zwei binären Masken.
-    
-    Args:
-        mask1, mask2: bool arrays gleicher Größe
-    
-    Returns:
-        iou: IoU-Wert zwischen 0 und 1
-    """
+
     mask1_bool = mask1.astype(bool)
     mask2_bool = mask2.astype(bool)
     
@@ -147,19 +83,3 @@ def _compute_iou(mask1: np.ndarray, mask2: np.ndarray) -> float:
     
     return float(intersection_count) / float(union_count)
 
-
-# -----------------------------
-# Haupt-IoU-Funktion
-# -----------------------------
-
-"""
-Die Hilfsfunktion compute_iou_decoder und der Typ IoUResultDecoder werden nicht benötigt,
-da der Aufrufer in calculate_IoU_for_decoder.py die Schritte explizit ausführt.
-"""
-
-
-# -----------------------------
-# Hilfsfunktionen für Export/Visualisierung 
-# -----------------------------
-
-# Die Export-/Overlay-Funktion wird nicht benötigt

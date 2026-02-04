@@ -27,6 +27,9 @@ num_images = 100
 
 
 import os
+
+
+
 from myThesis.encoder import nd_on_transformer_encoder
 from myThesis.encoder import calculate_IoU_for_encoder
 from myThesis.decoder import nd_on_transformer_decoder
@@ -37,10 +40,10 @@ from myThesis.lrp import calculate_network
 
 
 images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/1images"
-weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_0001199.pth"
+weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_0000399.pth"
 model = "car"
-train_state="finetune3"
-concept="orange"
+train_state="finetune1"
+concept="blau"
 
 
 
@@ -53,7 +56,7 @@ output_root="/Volumes/Untitled/Master-Arbeit_Ergebnisse/output/"
 if not os.path.exists(output_root):
     raise RuntimeError(f"⚠️ Externer Speicher nicht verfügbar: {output_root}\nBitte stelle sicher, dass der USB-Stick/die Festplatte eingehängt ist.")
 
-
+"""
 
 nd_on_transformer_encoder.main(
     images_dir=images_dir,
@@ -91,91 +94,6 @@ nd_on_transformer_decoder.main(
 
 calculate_IoU_for_decoder.main_network_dissection_per_query(
     percentile=0.90,
-    mask_dir=f"{local_root}image/{model}/{concept}",
-    decoder_out_dir=f"{output_root}{model}/{train_state}/decoder",
-    export_root=f"{output_root}{model}/{train_state}/{concept}/decoder", # decoder zu /{concept}/decoder
-    )
-
-
-calculate_network.main(
-        images_dir=images_dir,
-        output_root=f"{output_root}{model}/{train_state}",
-        encoder_rot_dir=f"{output_root}{model}/{train_state}/{concept}/encoder",
-        decoder_dir=f"{output_root}{model}/{train_state}/{concept}/decoder",
-        lrp_out_dir=f"{output_root}{model}/{train_state}/{concept}/lrp",
-        lrp_encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
-        lrp_decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
-        summary_csv=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
-        weights_path=weights_path,
-        model_type=model,  # Modelltyp für korrekte Konfiguration
-    )
-
-visualise_network.main(
-    module="encoder",
-    top_features=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
-    encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
-    decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
-    out=f"{output_root}{model}/{train_state}/{concept}/visualisations/encoder_graph",
-    k=5
-    )
-
-visualise_network.main(
-    module="decoder",
-    top_features=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
-    encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
-    decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
-    out=f"{output_root}{model}/{train_state}/{concept}/visualisations/decoder_graph",
-    k=5
-    )
-
-############################################################################################################
-############################################################################################################
-############################################################################################################
-
-
-images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/butterfly/1images"
-weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/butterfly_parts_finetune/model_0000899.pth"
-model = "butterfly"
-train_state="finetune3"
-concept="orange"
-
-
-nd_on_transformer_encoder.main(
-    images_dir=images_dir,
-    weights_path=weights_path,
-    output_dir=f"{output_root}{model}/{train_state}/encoder",
-    model=model,  # Modelltyp für korrekte Konfiguration
-)
-
-
-# Wir brauchen zugriff auf 
-# -> den Ort wo die Bilder zu finden sind
-# -> Das konkrete Modell + Trainingsstate, dass verwendet wird
-# -> Den Ort wo die Daten gespeichert werden sollen -> myThesis/output/car/fintune6/encoder...
-
-calculate_IoU_for_encoder.main(
-    percentile=0.995, 
-    mask_dir=f"{local_root}image/{model}/{concept}",
-    encoder_out_dir=f"{output_root}{model}/{train_state}/encoder",
-    export_root=f"{output_root}{model}/{train_state}/{concept}/encoder", # encoder zu /{concept}/encoder
-    export_mode="global-best",
-)
-# Wir brauchen zugriff auf 
-# -> den Ort wo die Masken zu finden sind
-# -> den Ort wo die benötigte Csv Datei zu finden ist.
-# -> Den Ort wo die Daten gespeichert werden sollen -> .../encoder...
-
-
-
-nd_on_transformer_decoder.main(
-    images_dir=images_dir,
-    weights_path=weights_path,
-    output_dir=f"{output_root}{model}/{train_state}/decoder",
-    model=model,  # Modelltyp für korrekte Konfiguration
-)
-
-calculate_IoU_for_decoder.main_network_dissection_per_query(
-    percentile=0.995,
     mask_dir=f"{local_root}image/{model}/{concept}",
     decoder_out_dir=f"{output_root}{model}/{train_state}/decoder",
     export_root=f"{output_root}{model}/{train_state}/{concept}/decoder", # decoder zu /{concept}/decoder
@@ -222,7 +140,91 @@ images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/1images"
 weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_0000799.pth"
 model = "car"
 train_state="finetune2"
-concept="orange"
+concept="blau"
+
+
+nd_on_transformer_encoder.main(
+    images_dir=images_dir,
+    weights_path=weights_path,
+    output_dir=f"{output_root}{model}/{train_state}/encoder",
+    model=model,  # Modelltyp für korrekte Konfiguration
+)
+
+
+# Wir brauchen zugriff auf 
+# -> den Ort wo die Bilder zu finden sind
+# -> Das konkrete Modell + Trainingsstate, dass verwendet wird
+# -> Den Ort wo die Daten gespeichert werden sollen -> myThesis/output/car/fintune6/encoder...
+
+calculate_IoU_for_encoder.main(
+    percentile=0.995, 
+    mask_dir=f"{local_root}image/{model}/{concept}",
+    encoder_out_dir=f"{output_root}{model}/{train_state}/encoder",
+    export_root=f"{output_root}{model}/{train_state}/{concept}/encoder", # encoder zu /{concept}/encoder
+    export_mode="global-best",
+)
+# Wir brauchen zugriff auf 
+# -> den Ort wo die Masken zu finden sind
+# -> den Ort wo die benötigte Csv Datei zu finden ist.
+# -> Den Ort wo die Daten gespeichert werden sollen -> .../encoder...
+
+
+
+nd_on_transformer_decoder.main(
+    images_dir=images_dir,
+    weights_path=weights_path,
+    output_dir=f"{output_root}{model}/{train_state}/decoder",
+    model=model,  # Modelltyp für korrekte Konfiguration
+)
+
+calculate_IoU_for_decoder.main_network_dissection_per_query(
+    percentile=0.995,
+    mask_dir=f"{local_root}image/{model}/{concept}",
+    decoder_out_dir=f"{output_root}{model}/{train_state}/decoder",
+    export_root=f"{output_root}{model}/{train_state}/{concept}/decoder", # decoder zu /{concept}/decoder
+    )
+
+
+calculate_network.main(
+        images_dir=images_dir,
+        output_root=f"{output_root}{model}/{train_state}",
+        encoder_rot_dir=f"{output_root}{model}/{train_state}/{concept}/encoder",
+        decoder_dir=f"{output_root}{model}/{train_state}/{concept}/decoder",
+        lrp_out_dir=f"{output_root}{model}/{train_state}/{concept}/lrp",
+        lrp_encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
+        lrp_decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
+        summary_csv=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
+        weights_path=weights_path,
+        model_type=model,  # Modelltyp für korrekte Konfiguration
+    )
+
+visualise_network.main(
+    module="encoder",
+    top_features=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
+    encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
+    decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
+    out=f"{output_root}{model}/{train_state}/{concept}/visualisations/encoder_graph",
+    k=5
+    )
+
+visualise_network.main(
+    module="decoder",
+    top_features=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
+    encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
+    decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
+    out=f"{output_root}{model}/{train_state}/{concept}/visualisations/decoder_graph",
+    k=5
+    )
+
+############################################################################################################
+############################################################################################################
+############################################################################################################
+
+images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/1images"
+weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_0001199.pth"
+model = "car"
+train_state="finetune3"
+concept="blau"
 
 
 
@@ -316,10 +318,10 @@ visualise_network.main(
 
 
 images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/butterfly/1images"
-weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/butterfly_parts_finetune/model_0000599.pth"
+weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/butterfly_parts_finetune/model_0000299.pth"
 model = "butterfly"
-train_state="finetune2"
-concept="orange"
+train_state="finetune1"
+concept="blau"
 
 
 nd_on_transformer_encoder.main(
@@ -394,3 +396,280 @@ visualise_network.main(
     out=f"{output_root}{model}/{train_state}/{concept}/visualisations/decoder_graph",
     k=5
     )
+
+############################################################################################################
+############################################################################################################
+############################################################################################################
+
+images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/butterfly/1images"
+weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/butterfly_parts_finetune/model_0000599.pth"
+model = "butterfly"
+train_state="finetune2"
+concept="blau"
+
+
+nd_on_transformer_encoder.main(
+    images_dir=images_dir,
+    weights_path=weights_path,
+    output_dir=f"{output_root}{model}/{train_state}/encoder",
+    model=model,  # Modelltyp für korrekte Konfiguration
+)
+
+
+# Wir brauchen zugriff auf 
+# -> den Ort wo die Bilder zu finden sind
+# -> Das konkrete Modell + Trainingsstate, dass verwendet wird
+# -> Den Ort wo die Daten gespeichert werden sollen -> myThesis/output/car/fintune6/encoder...
+
+calculate_IoU_for_encoder.main(
+    percentile=0.995, 
+    mask_dir=f"{local_root}image/{model}/{concept}",
+    encoder_out_dir=f"{output_root}{model}/{train_state}/encoder",
+    export_root=f"{output_root}{model}/{train_state}/{concept}/encoder", # encoder zu /{concept}/encoder
+    export_mode="global-best",
+)
+# Wir brauchen zugriff auf 
+# -> den Ort wo die Masken zu finden sind
+# -> den Ort wo die benötigte Csv Datei zu finden ist.
+# -> Den Ort wo die Daten gespeichert werden sollen -> .../encoder...
+
+
+
+nd_on_transformer_decoder.main(
+    images_dir=images_dir,
+    weights_path=weights_path,
+    output_dir=f"{output_root}{model}/{train_state}/decoder",
+    model=model,  # Modelltyp für korrekte Konfiguration
+)
+
+calculate_IoU_for_decoder.main_network_dissection_per_query(
+    percentile=0.995,
+    mask_dir=f"{local_root}image/{model}/{concept}",
+    decoder_out_dir=f"{output_root}{model}/{train_state}/decoder",
+    export_root=f"{output_root}{model}/{train_state}/{concept}/decoder", # decoder zu /{concept}/decoder
+    )
+
+
+calculate_network.main(
+        images_dir=images_dir,
+        output_root=f"{output_root}{model}/{train_state}",
+        encoder_rot_dir=f"{output_root}{model}/{train_state}/{concept}/encoder",
+        decoder_dir=f"{output_root}{model}/{train_state}/{concept}/decoder",
+        lrp_out_dir=f"{output_root}{model}/{train_state}/{concept}/lrp",
+        lrp_encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
+        lrp_decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
+        summary_csv=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
+        weights_path=weights_path,
+        model_type=model,  # Modelltyp für korrekte Konfiguration
+    )
+
+visualise_network.main(
+    module="encoder",
+    top_features=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
+    encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
+    decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
+    out=f"{output_root}{model}/{train_state}/{concept}/visualisations/encoder_graph",
+    k=5
+    )
+
+visualise_network.main(
+    module="decoder",
+    top_features=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
+    encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
+    decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
+    out=f"{output_root}{model}/{train_state}/{concept}/visualisations/decoder_graph",
+    k=5
+    )
+
+############################################################################################################
+############################################################################################################
+############################################################################################################
+
+images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/butterfly/1images"
+weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/butterfly_parts_finetune/model_0000899.pth"
+model = "butterfly"
+train_state="finetune3"
+concept="blau"
+
+
+nd_on_transformer_encoder.main(
+    images_dir=images_dir,
+    weights_path=weights_path,
+    output_dir=f"{output_root}{model}/{train_state}/encoder",
+    model=model,  # Modelltyp für korrekte Konfiguration
+)
+
+
+# Wir brauchen zugriff auf 
+# -> den Ort wo die Bilder zu finden sind
+# -> Das konkrete Modell + Trainingsstate, dass verwendet wird
+# -> Den Ort wo die Daten gespeichert werden sollen -> myThesis/output/car/fintune6/encoder...
+
+calculate_IoU_for_encoder.main(
+    percentile=0.995, 
+    mask_dir=f"{local_root}image/{model}/{concept}",
+    encoder_out_dir=f"{output_root}{model}/{train_state}/encoder",
+    export_root=f"{output_root}{model}/{train_state}/{concept}/encoder", # encoder zu /{concept}/encoder
+    export_mode="global-best",
+)
+# Wir brauchen zugriff auf 
+# -> den Ort wo die Masken zu finden sind
+# -> den Ort wo die benötigte Csv Datei zu finden ist.
+# -> Den Ort wo die Daten gespeichert werden sollen -> .../encoder...
+
+
+
+nd_on_transformer_decoder.main(
+    images_dir=images_dir,
+    weights_path=weights_path,
+    output_dir=f"{output_root}{model}/{train_state}/decoder",
+    model=model,  # Modelltyp für korrekte Konfiguration
+)
+
+calculate_IoU_for_decoder.main_network_dissection_per_query(
+    percentile=0.995,
+    mask_dir=f"{local_root}image/{model}/{concept}",
+    decoder_out_dir=f"{output_root}{model}/{train_state}/decoder",
+    export_root=f"{output_root}{model}/{train_state}/{concept}/decoder", # decoder zu /{concept}/decoder
+    )
+
+
+calculate_network.main(
+        images_dir=images_dir,
+        output_root=f"{output_root}{model}/{train_state}",
+        encoder_rot_dir=f"{output_root}{model}/{train_state}/{concept}/encoder",
+        decoder_dir=f"{output_root}{model}/{train_state}/{concept}/decoder",
+        lrp_out_dir=f"{output_root}{model}/{train_state}/{concept}/lrp",
+        lrp_encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
+        lrp_decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
+        summary_csv=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
+        weights_path=weights_path,
+        model_type=model,  # Modelltyp für korrekte Konfiguration
+    )
+
+visualise_network.main(
+    module="encoder",
+    top_features=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
+    encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
+    decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
+    out=f"{output_root}{model}/{train_state}/{concept}/visualisations/encoder_graph",
+    k=5
+    )
+
+visualise_network.main(
+    module="decoder",
+    top_features=f"{output_root}{model}/{train_state}/{concept}/lrp/top_features.csv",
+    encoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/encoder",
+    decoder_dir=f"{output_root}{model}/{train_state}/{concept}/lrp/decoder",
+    out=f"{output_root}{model}/{train_state}/{concept}/visualisations/decoder_graph",
+    k=5
+    )
+
+"""
+
+############################################################################################################
+############################################################################################################
+############################################################################################################
+
+
+from myThesis.linear_probing.linear_probing_pipeline import run_pipeline
+
+local_root="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/"
+output_root="/Volumes/Untitled/Master-Arbeit_Ergebnisse/output/"
+MODE = "all" # "encoder", "decoder" oder "all"
+LAYER = None # z.B. "layer0", "layer1" oder None für alle
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ausführung
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/1images"
+weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_0000399.pth"
+model = "car"
+train_state="finetune1"
+
+run_pipeline(
+    images_dir=images_dir,
+    weights_path=weights_path,
+    output_dir=f"{output_root}{model}/{train_state}/linear_probing",
+    model=model,
+    mode=MODE,
+    layer=LAYER,
+)
+
+images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/1images"
+weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_0000799.pth"
+model = "car"
+train_state="finetune2"
+
+run_pipeline(
+    images_dir=images_dir,
+    weights_path=weights_path,
+    output_dir=f"{output_root}{model}/{train_state}/linear_probing",
+    model=model,
+    mode=MODE,
+    layer=LAYER,
+)
+
+images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/car/1images"
+weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/car_parts_finetune/model_0001199.pth"
+model = "car"
+train_state="finetune3"
+
+run_pipeline(
+    images_dir=images_dir,
+    weights_path=weights_path,
+    output_dir=f"{output_root}{model}/{train_state}/linear_probing",
+    model=model,
+    mode=MODE,
+    layer=LAYER,
+)
+
+
+############################################################################################################
+############################################################################################################
+############################################################################################################
+
+images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/butterfly/1images"
+weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/butterfly_parts_finetune/model_0000299.pth"
+model = "butterfly"
+train_state="finetune1"
+
+run_pipeline(
+    images_dir=images_dir,
+    weights_path=weights_path,
+    output_dir=f"{output_root}{model}/{train_state}/linear_probing",
+    model=model,
+    mode=MODE,
+    layer=LAYER,
+)
+
+images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/butterfly/1images"
+weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/butterfly_parts_finetune/model_0000599.pth"
+model = "butterfly"
+train_state="finetune2"
+
+run_pipeline(
+    images_dir=images_dir,
+    weights_path=weights_path,
+    output_dir=f"{output_root}{model}/{train_state}/linear_probing",
+    model=model,
+    mode=MODE,
+    layer=LAYER,
+)
+
+images_dir="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/image/butterfly/1images"
+weights_path="/Users/nicklehmacher/Alles/MasterArbeit/myThesis/output/butterfly_parts_finetune/model_0000899.pth"
+model = "butterfly"
+train_state="finetune3"
+
+run_pipeline(
+    images_dir=images_dir,
+    weights_path=weights_path,
+    output_dir=f"{output_root}{model}/{train_state}/linear_probing",
+    model=model,
+    mode=MODE,
+    layer=LAYER,
+)
+

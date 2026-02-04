@@ -1,38 +1,15 @@
-"""
-Datenstrukturen für LRP-Attention.
-
-Diese Datei enthält nur die AttnCache Klasse, die alle Zwischenwerte
-für die LRP-Rückpropagation durch Attention-Layer speichert.
-"""
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Optional
 from torch import Tensor
 
+# Zwischenwerte für die LRP-Rückpropagation durch Self-Attention und Cross-Attention Layer
 
 @dataclass
 class AttnCache:
-    """Zwischenspeicher für Attention-Daten während des Forward-Passes.
-    
-    Speichert alle notwendigen Zwischenwerte für die LRP-Rückpropagation
-    durch Self-Attention und Cross-Attention Layer.
-    
-    Attribute für Standard-Attention:
-        attn_weights: Attention-Gewichte A = softmax(QK^T/√d) mit Shape (B,H,T,S)
-        attn_scores: Rohe Attention-Scores S = QK^T/√d (vor Softmax) (B,H,T,S)
-        Q: Query-Projektionen (B,H,T,Dh)
-        K: Key-Projektionen (B,H,S,Dh)
-        Vproj: Value-Projektionen V (B,H,S,Dh)
-        W_Q: Query-Projektionsgewichte (H,Dh,C)
-        W_K: Key-Projektionsgewichte (H,Dh,C)
-        W_V: Value-Projektionsgewichte (H,Dh,C)
-        W_O: Output-Projektionsgewichte (H,Dh,C)
-        scale: Skalierungsfaktor 1/√d_k
-    """
     # Standard Multi-Head Attention Felder
     attn_weights: Optional[Tensor] = None   # (B,H,T,S) - nach Softmax
-    attn_scores: Optional[Tensor] = None    # (B,H,T,S) - vor Softmax (raw scores)
+    attn_scores: Optional[Tensor] = None    # (B,H,T,S) - vor Softmax
     Q: Optional[Tensor] = None              # (B,H,T,Dh) Query-Projektionen
     K: Optional[Tensor] = None              # (B,H,S,Dh) Key-Projektionen
     Vproj: Optional[Tensor] = None          # (B,H,S,Dh) Value-Projektionen
@@ -40,18 +17,18 @@ class AttnCache:
     W_K: Optional[Tensor] = None            # (H,Dh,C) Key-Projektionsgewichte
     W_V: Optional[Tensor] = None            # (H,Dh,C) Value-Projektionsgewichte
     W_O: Optional[Tensor] = None            # (H,Dh,C) Output-Projektionsgewichte
-    scale: Optional[float] = None           # 1/√d_k Skalierungsfaktor
+    scale: Optional[float] = None           # Skalierungsfaktor
     
     # FFN-Gewichte (für MLP-Pfad):
-    W_FFN1: Optional[Tensor] = None         # (Dhid, C_in)
-    W_FFN2: Optional[Tensor] = None         # (C_out, Dhid)
+    W_FFN1: Optional[Tensor] = None
+    W_FFN2: Optional[Tensor] = None
     
     # Deformable Attention (MSDeformAttn) Felder:
     deform_sampling_locations: Optional[Tensor] = None  # (B, T, H, L, P, 2) in [0,1]
     deform_attention_weights: Optional[Tensor] = None   # (B, T, H, L, P)
     deform_spatial_shapes: Optional[Tensor] = None      # (L, 2) -> (H_l, W_l)
     deform_level_start_index: Optional[Tensor] = None   # (L,)
-    deform_im2col_step: Optional[int] = None            # optional metadata
+    deform_im2col_step: Optional[int] = None
     W_V_deform: Optional[Tensor] = None     # (H, Dh, C)
     W_O_deform: Optional[Tensor] = None     # (H, Dh, C)
     
@@ -59,9 +36,8 @@ class AttnCache:
     ln_x_in: Optional[Tensor] = None        # (B,T,C) Eingang der letzten LayerNorm
     ln_gamma: Optional[Tensor] = None       # (C,) LayerNorm-Gewicht
     ln_beta: Optional[Tensor] = None        # (C,) LayerNorm-Bias
-
+    # Zurücksetzen
     def clear(self):
-        """Setzt alle gespeicherten Werte zurück."""
         self.attn_weights = None
         self.attn_scores = None
         self.Q = None
